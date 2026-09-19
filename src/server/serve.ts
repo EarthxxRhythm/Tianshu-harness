@@ -33,7 +33,7 @@ import { buildConfigRoutes } from './config-routes.js'
 import { buildEnvRoute } from './env-route.js'
 import { buildBrowserRoutes } from './browser-routes.js'
 import { buildProjectTemplatesRoutes } from './project-templates-routes.js'
-import { getWorkspaceConfig } from '../config/workspace-config.js'
+import { registeredWorkspaces } from './workspace-guard.js'
 import { buildProjectDocsRoutes } from './project-docs-routes.js'
 import { buildTrustRoutes } from './trust-api.js'
 import { buildCacheRoutes } from './cache-routes.js'
@@ -964,24 +964,17 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   Object.assign(routes, buildBrowserRoutes(apiToken))
 
   // Project templates route: first-run AGENTS.md / .rivet.md bootstrap for desktop UI.
-  // 已注册工作区（存活会话 cwd + 配置里的默认工作区）——issue #221：project-docs /
-  // project-templates / project/trust 的 cwd 只接受这些目录，否则任意目录的
-  // AGENTS.md 可被读写、任意目录可被自我授信。
-  const knownWorkspaces = (): string[] => {
-    const fromSessions = (sharedRuntime.sessions?.listSessions() ?? []).map((s) => s.cwd)
-    const def = getWorkspaceConfig().defaultDir
-    return def ? [...fromSessions, def] : fromSessions
-  }
-  Object.assign(routes, buildProjectTemplatesRoutes(apiToken, knownWorkspaces))
+  // issue #221：project-docs / project-templates / project/trust 的 cwd 只接受已注册工作区。
+  Object.assign(routes, buildProjectTemplatesRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions)))
 
   // Project docs route: read/write AGENTS.md / .rivet.md for the desktop settings UI.
-  Object.assign(routes, buildProjectDocsRoutes(apiToken, knownWorkspaces))
+  Object.assign(routes, buildProjectDocsRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions)))
 
   // Cache usage route: 跨会话 cache-log 聚合 — 桌面端读不到 ~/.rivet 下的日志文件。
   Object.assign(routes, buildCacheRoutes({ apiToken, defaultCwd: () => process.cwd() }))
 
   // 桌面端的项目授信入口（此前只有 CLI 能授信，配置被剥离后无处恢复）。
-  Object.assign(routes, buildTrustRoutes(apiToken, knownWorkspaces))
+  Object.assign(routes, buildTrustRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions)))
 
   // MCP routes: server management + live status for the desktop MCP settings UI.
   Object.assign(routes, buildMcpRoutes({

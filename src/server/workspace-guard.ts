@@ -18,6 +18,7 @@
  * 就不该被这两个固定文件的路由触达。
  */
 import { resolve } from 'node:path'
+import { getWorkspaceConfig } from '../config/workspace-config.js'
 
 /** 大小写不敏感文件系统的规范形（Windows / macOS）——同一目录的两种写法必须同判。 */
 function canonical(p: string): string {
@@ -32,6 +33,20 @@ export function isKnownWorkspace(cwd: string, known: Iterable<string>): boolean 
     if (k && canonical(k) === target) return true
   }
   return false
+}
+
+/**
+ * 已注册工作区的来源：存活会话的 cwd + 配置里的默认工作区。
+ *
+ * 放在这里而不是 serve.ts——装配文件已顶到源码行数 ceiling（scripts/source-budgets.manifest.json），
+ * 按该文件的惯例，逻辑外提、装配层只留一行调用。
+ */
+export function registeredWorkspaces(
+  sessions: { listSessions(): Array<{ cwd: string }> } | undefined,
+): string[] {
+  const fromSessions = (sessions?.listSessions() ?? []).map((s) => s.cwd)
+  const def = getWorkspaceConfig().defaultDir
+  return def ? [...fromSessions, def] : fromSessions
 }
 
 export const UNKNOWN_WORKSPACE_ERROR = 'Unknown workspace: cwd is not a registered project'
