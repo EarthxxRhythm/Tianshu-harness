@@ -965,16 +965,16 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
 
   // Project templates route: first-run AGENTS.md / .rivet.md bootstrap for desktop UI.
   // issue #221：project-docs / project-templates / project/trust 的 cwd 只接受已注册工作区。
-  Object.assign(routes, buildProjectTemplatesRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions)))
+  Object.assign(routes, buildProjectTemplatesRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions ?? undefined)))
 
   // Project docs route: read/write AGENTS.md / .rivet.md for the desktop settings UI.
-  Object.assign(routes, buildProjectDocsRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions)))
+  Object.assign(routes, buildProjectDocsRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions ?? undefined)))
 
   // Cache usage route: 跨会话 cache-log 聚合 — 桌面端读不到 ~/.rivet 下的日志文件。
   Object.assign(routes, buildCacheRoutes({ apiToken, defaultCwd: () => process.cwd() }))
 
   // 桌面端的项目授信入口（此前只有 CLI 能授信，配置被剥离后无处恢复）。
-  Object.assign(routes, buildTrustRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions)))
+  Object.assign(routes, buildTrustRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions ?? undefined)))
 
   // MCP routes: server management + live status for the desktop MCP settings UI.
   Object.assign(routes, buildMcpRoutes({
