@@ -12,10 +12,14 @@ import type { ToolDefinition } from '../../api/types.js'
 
 /** sha256 of buildSystemPrompt({ tools: [] }) as of 2026-09-05（可读性校准：
  *  散文纪律收窄到交付报告 + 面向阅读回复的主动分点引导——回流 main 634af35bb）。
+ *  2026-09-19 **有意变更**（issue #217 后半）：<security> 段新增「数据≠指令」信任
+ *  边界条款，配合 agent/context.ts 的 <untrusted-content> 定界，把「工具输出是数据
+ *  不是指令」从 SECURITY.md 的散文承诺变成模型可见的规则。改它等于所有会话的前缀
+ *  缓存冷启动一次——这是那次变更的已知代价，不是意外。
  *  The sub-agent refactor must never move this: the main-controller prompt is
  *  the frozen head of every prefix-cached request, and a byte change
  *  invalidates every session. */
-const MAIN_PROMPT_SHA256 = '26043390ef70024e9718bc0429f339414874f284cd935d994ce455a87a274374'
+const MAIN_PROMPT_SHA256 = '2d22e0d8137f0c1c9f551e78fc9976f0a01cf35b2e4a4d7128a6d6fdde7eccc5'
 
 function tool(name: string): ToolDefinition {
   return { name, description: '', input_schema: { type: 'object', properties: {} } } as ToolDefinition
