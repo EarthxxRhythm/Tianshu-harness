@@ -274,3 +274,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：elysia395 <182482545+elysia395@users.noreply.github.com>
 
 - #271 docs: 补充 dsh-wallpaper-engine 上游署名与 MIT 声明（agent 自定义壁纸功能）（OPEN）
+- #283 fix(config): 删掉示例配置与四语 README 里 schema 不认的 cache 旋钮 + 键存在性守卫（issue #282）（CLOSED）
