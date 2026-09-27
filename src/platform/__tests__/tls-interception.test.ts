@@ -45,6 +45,19 @@ describe('findInterceptionCerts', () => {
     assert.deepEqual(vendors, ['Zscaler'])
   })
 
+  it('截断 suspects 时 vendors 仍覆盖全部命中厂商（多产品并存不漏报）', () => {
+    // issue #280：5 条 Zscaler 占满展示上限，第 6 家是 Kaspersky——
+    // 若 vendors 收集被截断分支卡住，/doctor 会漏报 Kaspersky，误导用户改错软件。
+    const certs = [
+      ...Array.from({ length: 5 }, (_, i) => PEM(`O=Zscaler Inc, CN=Zscaler Root CA ${i}`)),
+      PEM('C=RU, O=AO KASPERSKY LAB, CN=Kaspersky Anti-Virus Personal Root Certificate'),
+    ]
+    const { suspects, vendors, count } = findInterceptionCerts(certs)
+    assert.equal(count, 6)
+    assert.equal(suspects.length, 5) // 展示仍截断
+    assert.deepEqual(vendors, ['Zscaler', 'Kaspersky']) // 厂商清单不被截断
+  })
+
   it('subject 取 PEM 的第一行内容（不是 BEGIN 头）', () => {
     const { suspects } = findInterceptionCerts([
       `-----BEGIN CERTIFICATE-----\nO=ESET, spol. s r.o., CN=ESET SSL Filter CA\nMIIB...\n-----END CERTIFICATE-----`,

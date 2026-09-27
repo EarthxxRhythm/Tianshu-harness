@@ -104,9 +104,11 @@ export function findInterceptionCerts(certs: readonly string[]): {
     const vendor = INTERCEPTION_VENDORS.find(([re]) => re.test(cert))?.[1]
     if (!vendor) continue
     count++
+    // vendors 是「该改哪些软件」的完整清单，必须覆盖全部命中——只截断 suspects 展示，
+    // 否则多产品并存时排在 MAX_SUSPECTS 之后的厂商会漏报，误导用户改错软件（issue #280）。
+    if (!vendors.includes(vendor)) vendors.push(vendor)
     if (suspects.length < MAX_SUSPECTS) {
       suspects.push(firstLine(cert))
-      if (!vendors.includes(vendor)) vendors.push(vendor)
     }
   }
   return { suspects, vendors, count }
