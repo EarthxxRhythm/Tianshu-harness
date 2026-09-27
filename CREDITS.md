@@ -86,6 +86,8 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #15 docs(readme): renumber sections to fix duplicate '### 3.' heading（CLOSED）
 - #13 Feat rivet shell completions（MERGED）
 - #12 feat(completions): add fish and Windows-shell completion scripts（CLOSED）
+- #283 fix(config): 删掉示例配置与四语 README 里 schema 不认的 cache 旋钮 + 键存在性守卫（issue #282）（CLOSED）
+- #281 fix(platform): 加密连接扫描探测的厂商清单不再被展示上限吞掉（issue #280）（CLOSED）
 
 ## @Wanming08
 
@@ -209,6 +211,8 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #67 fix(server): disk-evidence self-heal for apply_edit delegation stalls (#61)（CLOSED）
 - #53 chore: .gitignore 加 .env/.env.*/!.env.example 防护（安全：API key 永不进 git）（MERGED）
 - #52 feat: add Windows one-click installer for Tianshu desktop（CLOSED）
+- #270 fix(scripts): 安装/构建链的 spawn 补 windowsHide——消除无控制台宿主下的闪窗（OPEN）
+- #267 fix(scripts): 注入点申报表在 CRLF 检出下误报——windows-smoke job 长期红的根因（OPEN）
 
 ## @yq04
 
@@ -274,7 +278,3 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：elysia395 <182482545+elysia395@users.noreply.github.com>
 
 - #271 docs: 补充 dsh-wallpaper-engine 上游署名与 MIT 声明（agent 自定义壁纸功能）（OPEN）
-- #283 fix(config): 删掉示例配置与四语 README 里 schema 不认的 cache 旋钮 + 键存在性守卫（issue #282）（CLOSED）
-- #281 fix(platform): 加密连接扫描探测的厂商清单不再被展示上限吞掉（issue #280）（CLOSED）
-- #270 fix(scripts): 安装/构建链的 spawn 补 windowsHide——消除无控制台宿主下的闪窗（OPEN）
-- #267 fix(scripts): 注入点申报表在 CRLF 检出下误报——windows-smoke job 长期红的根因（OPEN）
