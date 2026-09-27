@@ -58,6 +58,12 @@ function loadCreditHelper(): string {
 function makeLongHistoryRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dispose-credit-'))
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+  // HEAD 必须显式指向 fast-import 的目标分支：`git init` 的默认分支名由 runner 的
+  // init.defaultBranch 决定（CI 上实测是 master），HEAD 悬在未出生的分支上时下面那句
+  // `git log` 输出 0 字节 → 断言必红，且报错形如「合成仓的 log 输出应超出管道缓冲，
+  // 实际 0 字节」，与真正要锁的管道假阴性混在一起分不清。2026-09-27 公开仓 CI
+  // （ci 与 windows-smoke 两个 job 各 2 条）红的就是这个形态——本机绿、runner 红。
+  execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: dir })
   const stream: string[] = []
   for (let i = 0; i < 400; i++) {
     stream.push(
