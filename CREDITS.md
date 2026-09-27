@@ -268,3 +268,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #81 fix(agent): 会话转录写入失败丢批、flush 竞态击穿落盘屏障（CLOSED）
 - #79 fix(worker): Unix 上 OOP worker 以 detached 拉起——让 killProcessTree 组杀真正生效（MERGED）
 - #78 fix(worker): OOP worker 结算后摘除 abort 监听——不再把运行闭包钉死在会话信号上（MERGED）
+
+## @elysia395
+
+署名：elysia395 <182482545+elysia395@users.noreply.github.com>
+
+- #271 docs: 补充 dsh-wallpaper-engine 上游署名与 MIT 声明（agent 自定义壁纸功能）（OPEN）
