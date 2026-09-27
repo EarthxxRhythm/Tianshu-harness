@@ -290,3 +290,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：yuxilao <50688264+yuxilao@users.noreply.github.com>
 
 - #271 dsh-wallpaper-engine 壁纸引擎渲染技术顾问——为「自定义壁纸与分区玻璃」的合成与材质设计提供指导（上游核心开发）
+
+## @oneincase
+
+署名：oneincase <57388318+oneincase@users.noreply.github.com>
+
+- #271 dsh-wallpaper-engine 壁纸引擎渲染技术顾问——为「自定义壁纸与分区玻璃」的合成与材质设计提供指导（上游核心开发）
