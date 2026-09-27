@@ -1121,3 +1121,4 @@ Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2025-2026 T
 ## Acknowledgments
 
 - The desktop app's custom-wallpaper and per-surface glass **design** references <a href="https://github.com/elysia395/dsh-wallpaper-engine">dsh-wallpaper-engine</a> (MIT License). The implementation is original and contains no upstream code; see <a href="THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES.md</a> for the design scope and license text.
+- Special thanks to the author and core developers of dsh-wallpaper-engine — <a href="https://github.com/elysia395">@elysia395</a>, <a href="https://github.com/YV3507">@YV3507</a>, <a href="https://github.com/yuxilao">@yuxilao</a>, <a href="https://github.com/oneincase">@oneincase</a> — who served as **technical advisors on wallpaper-engine rendering** and provided guidance throughout the design and implementation of the wallpaper compositing and per-surface glass materials.

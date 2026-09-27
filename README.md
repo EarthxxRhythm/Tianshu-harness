@@ -367,3 +367,4 @@ node dist/cli/entry.js
 ## 致谢
 
 - 桌面端「自定义壁纸与分区玻璃」功能的**设计**参考了 <a href="https://github.com/elysia395/dsh-wallpaper-engine">dsh-wallpaper-engine</a>（MIT License）；该功能为天枢独立实现，未引入上游代码，参考范围与许可全文见 <a href="THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES.md</a>。
+- 特别致谢 dsh-wallpaper-engine 的作者与核心开发——<a href="https://github.com/elysia395">@elysia395</a>、<a href="https://github.com/YV3507">@YV3507</a>、<a href="https://github.com/yuxilao">@yuxilao</a>、<a href="https://github.com/oneincase">@oneincase</a>：四位作为**壁纸引擎渲染的技术顾问**，在壁纸合成与分区玻璃材质的设计、实现过程中提供了指导。

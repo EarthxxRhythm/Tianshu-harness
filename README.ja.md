@@ -1233,3 +1233,4 @@ tianshu logs open desktop            # sidecar ログディレクトリを開く
 ## 謝辞
 
 - デスクトップ版「カスタム壁紙と領域別ガラス」機能の**デザイン**は <a href="https://github.com/elysia395/dsh-wallpaper-engine">dsh-wallpaper-engine</a>（MIT License）を参考にしています。実装は天枢による独自実装で、上流のコードは含みません。参考範囲とライセンス全文は <a href="THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES.md</a> を参照してください。
+- dsh-wallpaper-engine の作者とコア開発者——<a href="https://github.com/elysia395">@elysia395</a>、<a href="https://github.com/YV3507">@YV3507</a>、<a href="https://github.com/yuxilao">@yuxilao</a>、<a href="https://github.com/oneincase">@oneincase</a> の四名に特に感謝します。**壁紙エンジンレンダリングの技術顧問**として、壁紙の合成と領域別ガラスマテリアルの設計・実装にご指導いただきました。

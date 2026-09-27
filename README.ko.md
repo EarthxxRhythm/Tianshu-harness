@@ -1234,4 +1234,5 @@ tianshu logs open desktop            # 打开 sidecar 日志目录（GUI 起不�
 ## 감사의 말
 
 - 데스크톱 앱의 "사용자 지정 배경화면과 영역별 유리" 기능 **디자인**은 <a href="https://github.com/elysia395/dsh-wallpaper-engine">dsh-wallpaper-engine</a>(MIT License)을 참고했습니다. 구현은 천수가 독자적으로 작성한 것이며 상류 코드를 포함하지 않습니다. 참고 범위와 라이선스 전문은 <a href="THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES.md</a>를 참조하세요.
+- dsh-wallpaper-engine의 작성자와 핵심 개발자 —<a href="https://github.com/elysia395">@elysia395</a>, <a href="https://github.com/YV3507">@YV3507</a>, <a href="https://github.com/yuxilao">@yuxilao</a>, <a href="https://github.com/oneincase">@oneincase</a>— 네 분께 특별히 감사드립니다. **배경화면 엔진 렌더링 기술 고문**으로서 배경화면 합성과 영역별 유리 재질의 설계·구현에 지도를 해주셨습니다.
 
