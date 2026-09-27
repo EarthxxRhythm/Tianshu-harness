@@ -277,3 +277,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #283 fix(config): 删掉示例配置与四语 README 里 schema 不认的 cache 旋钮 + 键存在性守卫（issue #282）（CLOSED）
 - #281 fix(platform): 加密连接扫描探测的厂商清单不再被展示上限吞掉（issue #280）（CLOSED）
 - #270 fix(scripts): 安装/构建链的 spawn 补 windowsHide——消除无控制台宿主下的闪窗（OPEN）
+- #267 fix(scripts): 注入点申报表在 CRLF 检出下误报——windows-smoke job 长期红的根因（OPEN）
