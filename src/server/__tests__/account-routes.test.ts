@@ -22,6 +22,7 @@ import { buildAccountRoutes, type AccountApi } from '../account-routes.js'
 import { TokenStore } from '../../auth/token-store.js'
 import {
   accountIdentityUrl,
+  accountManageUrl,
   cachedAccountIdentity,
   cachedAccountProfile,
   isAccountIdentityStale,
@@ -80,6 +81,7 @@ function stubApi(over: Partial<AccountApi> = {}): AccountApi {
     saveAccountProfile,
     cachedAccountProfile,
     accountIdentityUrl,
+    accountManageUrl,
     ...over,
   }
 }
@@ -439,6 +441,20 @@ test('GET /account/status：带上官网星籍页 URL（供「在官网查看」
     const res = await routerFor(home)('GET', '/account/status', {}, AUTH)
     assert.equal((res.body as { identityUrl: string }).identityUrl, accountIdentityUrl())
     assert.match(accountIdentityUrl(), /\/space\/identity$/)
+  } finally {
+    cleanup()
+  }
+})
+
+test('GET /account/status：带上账号与授权页 URL（「设备与授权」区的入口目标）', async () => {
+  const { home, cleanup } = makeHome()
+  try {
+    new TokenStore(home, 'account').save({ accessToken: 'AT', expiresAt: Date.now() + 3600_000 })
+    const res = await routerFor(home)('GET', '/account/status', {}, AUTH)
+    assert.equal((res.body as { manageUrl: string }).manageUrl, accountManageUrl())
+    // 路径锚定在 /space/account：文案刻意不承诺「管理设备」（官网解绑入口 Task 4.1 未做），
+    // 但入口指向的页面必须是账号与授权页，不是星籍页——两者同基址，只有路径能区分。
+    assert.match(accountManageUrl(), /\/space\/account$/)
   } finally {
     cleanup()
   }

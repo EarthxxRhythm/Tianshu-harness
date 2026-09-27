@@ -97,6 +97,18 @@ export function accountIdentityUrl(): string {
   return `${accountSiteBase()}/space/identity`
 }
 
+/**
+ * 账号与授权页 URL——个人中心权益面板「在官网查看账号与授权」的目标。
+ *
+ * 与 `accountIdentityUrl()` 同源同基址，只是路径不同；域名单一来源因此仍只有
+ * `accountSiteBase()` 一处。**文案刻意不写「管理设备」**：该页上的远程解绑入口
+ * 是账号授权体系的 Task 4.1，至今未实现（Wave 4 未开始）——不给用户指向不存在的
+ * 功能。等官网侧就绪后，改这里一行即可。
+ */
+export function accountManageUrl(): string {
+  return `${accountSiteBase()}/space/account`
+}
+
 // ── 授权请求 ─────────────────────────────────────────────────────────────
 
 export interface DeviceCreateResult {

@@ -98,7 +98,7 @@ test('GET /health includes loop-lag fields when a monitor is wired, omits otherw
   assert.ok(!('loopLagP99Ms' in plain), 'no monitor wired → fields absent')
 })
 
-test('LoopHealthMonitor measures a synchronous stall and resets per window', async () => {
+test('LoopHealthMonitor shares a sampled stall window across consumers', async () => {
   const { LoopHealthMonitor } = await import('../loop-health.js')
   const mon = new LoopHealthMonitor()
   mon.start()
@@ -107,13 +107,13 @@ test('LoopHealthMonitor measures a synchronous stall and resets per window', asy
     await new Promise((r) => setTimeout(r, 50))
     const stallUntil = Date.now() + 120
     while (Date.now() < stallUntil) { /* synchronous stall */ }
-    await new Promise((r) => setTimeout(r, 50))
+    await new Promise((r) => setTimeout(r, 1100))
     const first = mon.snapshot()
     assert.ok(first.maxMs >= 100, `stall must register in maxMs, got ${first.maxMs}`)
     // Next window is clean — reset must not carry the spike over.
     await new Promise((r) => setTimeout(r, 60))
     const second = mon.snapshot()
-    assert.ok(second.maxMs < first.maxMs, 'window reset must clear the previous spike')
+    assert.equal(second.maxMs, first.maxMs, 'reading a snapshot must not clear the spike')
   } finally {
     mon.stop()
   }

@@ -1040,4 +1040,62 @@ describe('SessionPersist list cache incremental update', () => {
     assert.equal(list.length, 1)
     assert.ok(list[0]!.updatedAt >= 1_000)
   })
+
+  it('getTranscriptWatermark counts appended OAI messages (observation only)', async () => {
+    const persist = new SessionPersist('test-session-wm', tempDir)
+    assert.equal(persist.getTranscriptWatermark(), 0)
+    await persist.appendOaiWithChecksum({ role: 'user', content: 'hi' }, { flush: true })
+    await persist.appendOaiWithChecksum({ role: 'assistant', content: 'yo' })
+    assert.equal(persist.getTranscriptWatermark(), 2)
+  })
+
+})
+
+describe('transcript watermark（PLAN §4 第 1 步）', () => {
+  const tmpRoot = () => {
+    const d = mkdtempSync(join(tmpdir(), 'rivet-tw-'))
+    process.env.RIVET_SESSION_DIR = d
+    return d
+  }
+  const oai = (n: number): OaiMessage => ({ role: 'user', content: `m${n}` })
+
+  it('重新加载已有历史后，水位等于转录真实条数（此前恒为 0）', async () => {
+    const d = tmpRoot()
+    try {
+      const s = new SessionPersist('tw-load', '/fake-cwd')
+      await s.appendOaiWithChecksum(oai(1), { flush: true })
+      await s.appendOaiWithChecksum(oai(2), { flush: true })
+      // 新实例 = 恢复/重开进程：旧口径只统计「本实例 append 过多少条」，这里是 0。
+      const reopened = new SessionPersist('tw-load', '/fake-cwd')
+      assert.equal(reopened.loadOai().length, 2, '前置：历史应能读回 2 条')
+      assert.equal(reopened.getTranscriptWatermark(), 2, '水位必须对齐转录真实条数')
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+
+  it('追加后水位随之 +1，且与恢复端同一把尺子', async () => {
+    const d = tmpRoot()
+    try {
+      const s = new SessionPersist('tw-append', '/fake-cwd')
+      await s.appendOaiWithChecksum(oai(1), { flush: true })
+      await s.appendOaiWithChecksum(oai(2), { flush: true })
+      s.loadOai()
+      await s.appendOaiWithChecksum(oai(3), { flush: true })
+      assert.equal(s.getTranscriptWatermark(), 3, '2 条历史 + 1 条追加 = 3')
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+
+  it('历史重写（压缩）后水位落到新条数——它会变小', async () => {
+    const d = tmpRoot()
+    try {
+      const s = new SessionPersist('tw-compact', '/fake-cwd')
+      for (const n of [1, 2, 3, 4]) await s.appendOaiWithChecksum(oai(n), { flush: true })
+      s.loadOai()
+      assert.equal(s.getTranscriptWatermark(), 4)
+      s.compactOai([oai(9)])
+      assert.equal(s.getTranscriptWatermark(), 1, '重写后必须跟着缩短（只增不减会让水位虚高）')
+      assert.equal(s.loadOai().length, 1, '落盘也确实只剩 1 条')
+      await s.compactOaiAsync([oai(8), oai(7)])
+      assert.equal(s.getTranscriptWatermark(), 2)
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
 })

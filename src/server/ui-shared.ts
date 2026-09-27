@@ -43,6 +43,8 @@ export {
   BROWSER_NAVIGATED_PREFIX,
   BROWSER_SCREENSHOT_OF_PREFIX,
   COMPUTER_USE_A11Y_TREE_PREFIX,
+  SCREENSHOT_ARTIFACT_MARKER,
+  screenshotArtifactIdOf,
 } from '../tools/output-markers.js'
 
 // browser_debug 日志行解析（ToolGroup 渲染网络/控制台行）

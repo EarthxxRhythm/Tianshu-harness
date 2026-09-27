@@ -13,7 +13,7 @@ import { ReasoningRepetitionGuard, REASONING_REPETITION_CORRECTION } from './rea
 import { normalizeBaseUrl } from './endpoint-map.js'
 import { sanitizeMessageContent, countContentChars, FULL_SANITIZE_CHARS } from '../utils/sanitize.js'
 import { parseOpenAIError } from './error-hints.js'
-import { enforceRequestBodyLimit } from './request-body-guard.js'
+import { createBodyGuardNotifyState, enforceRequestBodyLimit, notifyBodyGuard } from './request-body-guard.js'
 import { stableStringify } from './stable-json.js'
 import { RequestInvariantMonitor } from './request-invariant.js'
 import { wireAbortToReaderCancel, wrapBodyTimeoutError } from './abort-reader.js'
@@ -205,6 +205,12 @@ export interface OpenAIClientConfig {
   /** Provider-level retry policy (issue #75)：退避曲线 / 类别覆盖 / 客户端限速。
    *  undefined = 历史行为（分类器固定延迟 + 内置预算）。 */
   retry?: ProviderRetryConfig
+  /**
+   * 共享重试预算 getter（PLAN §3）：返回**当前逻辑运行**的预算（agent 重连与
+   * provider 重试共用一份）。undefined = 不启用共享预算（历史行为）。
+   * 用 getter 而非实例：客户端在 agent 构造期建好，预算是 per-run 的。
+   */
+  retryBudget?: () => import('./retry-budget.js').RetryBudget | undefined
   /** Provider-level sampling temperature default (0–2)。仅当请求未显式指定
    *  temperature 且 thinking 未启用时注入——推理模式下多数服务端拒绝调温。 */
   temperature?: number
@@ -432,9 +438,8 @@ export class OpenAIClient implements StreamClient {
   // context windows. We track the sanitized count and only apply the
   // safety-net sanitize to newly appended messages.
   private _sanitizedCount: number
-  /** body 护栏上报去重：-1 = 还没报过；true = 逼近上限已提醒过（每会话一次）。 */
-  private bodyDegradeNotifiedCount = -1
-  private bodyNearLimitNotified = false
+  /** body 护栏上报节律（跨请求保持；去重语义见 notifyBodyGuard）。 */
+  private readonly bodyGuardNotify = createBodyGuardNotifyState()
 
   setReasoningEffort(effort: string): void {
     // OpenAI uses reasoning_effort in request body — store for next request
@@ -808,6 +813,9 @@ export class OpenAIClient implements StreamClient {
       // 后续轮次仍保图（用户下一句「这张图里…」还能对上）。stripOaiImageParts
       // 是纯函数，无图可剥时返回原引用，下面按引用比较走原路径。
       let wireMessages = body.messages as OaiMessage[]
+      // 已剥图的重试：每次 attempt 都从原始 body 重建，必须幂等重放剥离，否则后续
+      // 因别的原因重试（500 等）会把毒图又发出去（pinned by image_strip recovery 测试）。
+      if (imagesStripped) wireMessages = stripOaiImageParts(wireMessages).messages
       // 保留思考内容重发（上一次失败被判 reasoning_echo）：从**原始** request.messages
       // 重建（body.messages 已经是剥离后的历史，剥掉的信息回不来）。与剥图同理，
       // 只改本次 attempt 的 wire 副本，不动 request.messages / body。
@@ -825,7 +833,7 @@ export class OpenAIClient implements StreamClient {
           imagesStripped = true
           // 模型这一轮再也看不到这些图了——必须让调用方有机会告诉用户，
           // 否则「模型没理我的截图」会被当成模型变笨。
-          callbacks.onImageStripped?.({ removedCount: stripped.removedCount })
+          callbacks.onImageStripped?.({ removedCount: stripped.removedCount, uniqueUrlCount: stripped.uniqueUrlCount })
         }
       }
 
@@ -877,23 +885,9 @@ export class OpenAIClient implements StreamClient {
       // 未配置 maxBodyBytes 时不启用（不量体、零额外成本）；上游报错文案会引导配置。
       const guard = enforceRequestBodyLimit(effectiveBody, { limitBytes: this.config.maxBodyBytes })
       // 降级/逼近上限必须可见（同 issue #94 的剥图教训：wire 层降级静默 = 用户读成
-      // 「模型变笨了」）。降级只在"降级集合变化"时上报一次——截断是确定性的，同一段
-      // 历史每轮都被同样地截，逐轮上报只会把状态行刷成噪音。
-      if (guard.degraded.length > 0) {
-        if (guard.degraded.length !== this.bodyDegradeNotifiedCount) {
-          this.bodyDegradeNotifiedCount = guard.degraded.length
-          callbacks.onBodyGuard?.({
-            kind: 'degraded',
-            bytes: guard.bytes,
-            limitBytes: guard.limitBytes,
-            degradedCount: guard.degraded.length,
-            removedBytes: guard.degraded.reduce((n, d) => n + d.removedBytes, 0),
-          })
-        }
-      } else if (guard.nearLimit && !this.bodyNearLimitNotified) {
-        this.bodyNearLimitNotified = true
-        callbacks.onBodyGuard?.({ kind: 'near-limit', bytes: guard.nearLimit.bytes, limitBytes: guard.nearLimit.limitBytes })
-      }
+      // 「模型变笨了」）。节流规则（降级集合变化才报一次、逼近上限每会话一次）在
+      // notifyBodyGuard 里与 anthropic 侧共用一份。
+      notifyBodyGuard(guard, this.bodyGuardNotify, callbacks.onBodyGuard)
       // 客户端限速（未配置 rateLimit 时零开销）：同 provider 的所有 client 实例共享一只桶。
       await acquireRateLimitSlot(this.config.providerName ?? this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
       const response = await fetchWithTimeout(`${normalizeBaseUrl(this.config.baseUrl)}/chat/completions`, {
@@ -956,6 +950,7 @@ export class OpenAIClient implements StreamClient {
 
       await this.parseStreamFromReader(reader, callbacks, signal, reasoningRef, lifecycle, firstByteMs)
     }, signal, {
+      budget: this.config.retryBudget?.(),
       maxTotalDurationMs: this.config.retry?.maxTotalDurationMs
         ?? (this.config.providerName === 'glm' ? 20 * 60_000 : 10 * 60_000),
       // Thinking retries are normally throttled to 1 because re-reasoning is costly.

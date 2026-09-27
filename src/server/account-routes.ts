@@ -63,6 +63,8 @@ export interface AccountApi {
   cachedAccountProfile(token: TokenData | null): AccountProfileSnapshot | null
   /** 官网星籍页 URL（「在官网查看」按钮的目标）。 */
   accountIdentityUrl(): string
+  /** 官网账号与授权页 URL（个人中心权益面板「在官网查看账号与授权」的目标）。 */
+  accountManageUrl(): string
 }
 
 export interface AccountRoutesDeps {
@@ -125,6 +127,7 @@ function defaultAccountApi(): AccountApi {
     cachedAccountProfile: accountModule.cachedAccountProfile,
     isAccountIdentityStale: accountModule.isAccountIdentityStale,
     accountIdentityUrl: accountModule.accountIdentityUrl,
+    accountManageUrl: accountModule.accountManageUrl,
   }
 }
 
@@ -290,6 +293,7 @@ export function buildAccountRoutes(deps: AccountRoutesDeps): Record<string, Rout
           // 上次同步时刻：让界面能解释"为什么这可能是旧的"（TTL 24h + 手动刷新）
           identityFetchedAt: cached && cached.fetchedAt > 0 ? cached.fetchedAt : null,
           identityUrl: api.accountIdentityUrl(),
+          manageUrl: api.accountManageUrl(),
           avatarUrl: cachedProfile?.avatarUrl ?? null,
           founding: cachedProfile?.founding ?? null,
           profileFetchedAt: cachedProfile && cachedProfile.fetchedAt > 0 ? cachedProfile.fetchedAt : null,

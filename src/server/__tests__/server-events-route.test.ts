@@ -17,6 +17,7 @@ import { RUNTIME_CAPABILITIES } from '../protocol.js'
 const TOKEN = 'events-token'
 
 const healthBody = (): HealthBody => ({
+  instanceId: 'test-instance', readiness: 'ready',
   ok: true, version: '0.0.0-test', protocolVersion: 1, capabilities: RUNTIME_CAPABILITIES,
   uptimeMs: 1, sessionCount: 2, runningCount: 1, registryOk: true, configured: true,
 })

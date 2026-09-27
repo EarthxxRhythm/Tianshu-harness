@@ -19,7 +19,7 @@ import { extractClaimsFromToolResult } from '../context/claim-extractor.js'
 import { appendProjectMemory, compactProjectMemory } from '../context/project-memory-writer.js'
 import { detectConflicts } from '../context/conflict-detect.js'
 import { createAntibodyProposal } from '../context/antibody.js'
-import { touchActivity } from './stall-observer.js'
+import { touchActivity, setActivityPhase } from './stall-observer.js'
 import { buildImportGraphAsync, invalidateFile } from './import-graph.js'
 import { generateImpactHint } from './impact-hint.js'
 import { analyzeImpact } from '../repo/meridian-impact.js'
@@ -210,7 +210,7 @@ async function emitToolResultTrace(input: {
   id: string
   name: string
   isError: boolean | undefined
-  contentLen: number
+  contentLen: number; errorKind?: string // errorKind = 结构化失败分类（trace 归因用）
   source: 'pipeline' | 'bridge' | 'tui'
 }): Promise<void> {
   try {
@@ -224,7 +224,7 @@ async function emitToolResultTrace(input: {
       name: input.name,
       isError: input.isError,
       contentLen: input.contentLen,
-      source: input.source,
+      source: input.source, errorKind: input.errorKind,
     })
     await appendFile(join(sessionDir, 'tool-result-trace.jsonl'), `${line}\n`, 'utf8')
   } catch {
@@ -1418,6 +1418,9 @@ async function executeToolUseInner(
       input: tu.input,
       turn,
       execute: async () => {
+        setActivityPhase(activityKey, 'saving', Date.now() + 30_000)
+        await callbacks.beforeToolExecute?.(tu.id, tu.name, tu.input)
+        deps.abortSignal?.throwIfAborted()
         // 无进展哨兵打点：工具执行起止（CLI/server 共用 agent 内核）。start
         // 后无 end = 卡在工具内（stall-observer 90s 后指认）；end 后无下一
         // start = 卡在回合处理。finally 保证 end 在成功/失败/超时都触达。
@@ -1430,6 +1433,7 @@ async function executeToolUseInner(
           // (smaller) cap; serving cached content here would re-introduce the
           // truncation regression. fs.readFile + OS page cache is fast enough.
           const toolTimeout = toolDef?.timeoutMs?.(params) ?? DEFAULT_TOOL_TIMEOUT_MS
+          setActivityPhase(activityKey, 'tool', Date.now() + toolTimeout)
           // P0/H1: compose a per-tool timeout AbortController with the loop signal,
           // so a tool-level timeout cascades an abort into the underlying op
           // (child proc / fetch) instead of merely rejecting the wrapper Promise.
@@ -1466,6 +1470,7 @@ async function executeToolUseInner(
           rawToolResult = r
           return { content: r.content, isError: r.isError }
         } finally {
+          setActivityPhase(activityKey, 'running')
           touchActivity(activityKey, `tool:${tu.name}:end`)
         }
      },
@@ -1690,7 +1695,7 @@ async function executeToolUseInner(
     // commits to scrollback. Force false so terminal results render.
     // DEBUG: unconditional trace for TUI rendering-loss investigation.
     // Log file: ~/.rivet/sessions/<project-slug>/<sessionId>/tool-result-trace.jsonl
-    void emitToolResultTrace({ cwd: deps.cwd, sessionId: deps.sessionId, id: tu.id, name: tu.name, isError: harnessResult.isError, contentLen: finalContent.length, source: 'pipeline' })
+    void emitToolResultTrace({ cwd: deps.cwd, sessionId: deps.sessionId, id: tu.id, name: tu.name, isError: harnessResult.isError, contentLen: finalContent.length, source: 'pipeline', errorKind: rawToolResult?.errorKind ?? harnessResult.errorClass })
     callbacks.onToolResult(tu.id, tu.name, finalContent, harnessResult.isError ?? false, rawToolResult?.rawPath, rawToolResult?.uiContent)
 
     deps.recordToolHistory(tu.name, tu.input, harnessResult.isError, harnessResult.content, rawToolResult?.errorClass, rawToolResult?.errorKind)
@@ -2209,4 +2214,3 @@ function extractGrepMatchPaths(grepOutput: string, cwd: string): string[] {
 
   return paths
 }
-
