@@ -73,14 +73,30 @@ if [[ "$state" == "CLOSED" && "$has_sync_merged" == "true" ]]; then
   exit 0
 fi
 
-# 真人署名：commits 作者里滤掉 bot 与仓库拥有者；取不到则用 PR author 的 noreply。
-author_line=$(jq -r --arg owner "$OWNER" '
+# 真人署名：只采用「能与 GitHub 账号关联」的 commit 作者——login 与 PR 作者一致，
+# 或 email 是 GitHub noreply 形态；否则回退到 PR 作者的 ID+noreply。
+#
+# 为何要校验（2026-09-30 处置 #304/#305 实踩）：作者本机没配 user.email 时，git 会把
+# 署名猜成 <用户名>@<主机名>.local——那不是账号关联邮箱，Contributors 面板**不计入**，
+# 而上一版逻辑直接取「commits 里第一个非 bot 非 owner 的作者」，于是
+# 「邹杰 <zoujie@zoujiedeMacBook-Air-463.local>」被当成署名落进了公开仓历史，
+# 既漏账又是张冠李戴。本处与 credit-contributors.sh 的署名规则对齐（那里同样是
+# 「能匹配到同一 login 才采用 commit/历史里的值，否则用 PR 作者 noreply」）。
+# 回退形态带账号 ID（`ID+login@users.noreply.github.com`）——旧的无 ID 形态对新账号无效。
+noreply_for() {
+  local who="$1" id
+  id=$(gh api "users/${who}" --jq .id 2>/dev/null || true)
+  if [[ -n "$id" ]]; then printf '%s+%s@users.noreply.github.com' "$id" "$who"
+  else printf '%s@users.noreply.github.com' "$who"; fi
+}
+author_line=$(jq -r --arg owner "$OWNER" --arg login "$login" '
   [.commits[].authors[]
    | select((.name | test("(?i)cursor|copilot|github-actions|\\[bot\\]")) | not)
-   | select(.login != $owner and .name != $owner)]
+   | select(.login != $owner and .name != $owner)
+   | select(.login == $login or ((.email // "") | test("(users\\.)?noreply\\.github\\.com$")))]
   | first // empty | "\(.name) <\(.email)>"' <<<"$info")
 if [[ -z "$author_line" ]]; then
-  author_line="${login} <${login}@users.noreply.github.com>"
+  author_line="${login} <$(noreply_for "$login")>"
 fi
 echo "    标题: ${title}"
 echo "    作者: @${login}（署名落账: ${author_line}）"
