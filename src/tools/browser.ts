@@ -56,7 +56,7 @@ export interface BrowserToolOptions {
 // 此处 re-export 保持内核调用方不变。
 export { BROWSER_NAVIGATED_PREFIX, BROWSER_SCREENSHOT_OF_PREFIX } from './output-markers.js'
 import { BROWSER_NAVIGATED_PREFIX, BROWSER_SCREENSHOT_OF_PREFIX } from './output-markers.js'
-import { PLAYWRIGHT_INSTALL_HINT, PLAYWRIGHT_CORE_INSTALL_HINT } from './net/playwright-driver.js'
+import { PLAYWRIGHT_CORE_INSTALL_HINT, launchWithSystemFallback } from './net/playwright-driver.js'
 
 /** Default allowlist: comma-separated hosts in RIVET_BROWSER_ALLOWLIST. */
 function envAllowlist(): string[] {
@@ -173,13 +173,16 @@ async function playwrightDriver(): Promise<BrowserDriver> {
   // Dynamic specifier via a variable so tsc doesn't try to resolve the optional
   // 'playwright-core' types at build time.
   const specifier = 'playwright-core'
-  let mod: { chromium: { launch: (o: { headless: boolean }) => Promise<unknown> } }
+  let mod: { chromium: { launch: (o: { headless: boolean; executablePath?: string }) => Promise<unknown> } }
   try {
     mod = (await import(specifier)) as never
   } catch {
     throw new Error(`未安装 playwright-core。${PLAYWRIGHT_CORE_INSTALL_HINT}`)
   }
-  const browser = (await mod.chromium.launch({ headless: true })) as {
+  // #302：registry 缺浏览器时回退系统 Chromium（与 net/playwright-driver 同口径）。
+  const browser = (await launchWithSystemFallback((executablePath) =>
+    mod.chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) }),
+  )) as {
     newPage: () => Promise<never>
     close: () => Promise<void>
   }

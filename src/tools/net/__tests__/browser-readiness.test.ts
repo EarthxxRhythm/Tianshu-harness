@@ -38,10 +38,61 @@ test('probeChromium returns a well-formed three-state result on this machine', a
   assert.equal(typeof p.installed, 'boolean')
   // installed ⟺ state==='ready'
   assert.equal(p.installed, p.state === 'ready')
-  if (p.installed) assert.ok(p.executablePath, 'ready probe carries an executablePath')
+  if (p.installed) {
+    assert.ok(p.executablePath, 'ready probe carries an executablePath')
+    // #302：ready 必须带来源（playwright 自管缓存 / 系统安装）
+    assert.ok(p.source === 'playwright' || p.source === 'system', 'ready probe carries a source')
+  }
 })
 
 // NOTE: probeChromium 的 browser-missing 分支已用**子进程**（PLAYWRIGHT_BROWSERS_PATH
 // 指向空目录，进程启动前注入）实测验证——playwright-core 在模块加载时读取该 env 并缓存，
 // 同进程内运行时改 env 不生效，故这里不用 in-process env mutation 重测（会误判为 ready）。
 // browser-missing 的**结构**（banner 文案、三态字段）由上面的纯函数测试覆盖。
+
+// ==== #302：playwright 缓存缺失时回退系统浏览器（probeChromium 编排）====
+//
+// 修复前：probeChromium 只认 playwright 自管目录，系统装了 chromium/chrome 也报
+// browser-missing（issue #302，发行版包管理器安装浏览器 Linux 用户全体命中）。
+// 以 deps 注入驱动：loadPw 替代真实 playwright-core；platform/exists/which 喂给
+// 系统探测——同进程内完全确定，不依赖宿主真实安装。
+
+const PW_CACHE_MISSING = {
+  chromium: { executablePath: () => '/nonexistent/pw-cache/chromium-1234/chrome-linux64/chrome' },
+}
+
+test('#302: playwright 缓存缺 + 系统 Chromium 在 → ready 且 source=system', async () => {
+  const p = await probeChromium({
+    loadPw: async () => PW_CACHE_MISSING,
+    platform: 'linux',
+    exists: (x) => x === '/usr/bin/chromium',
+    which: () => undefined,
+  })
+  assert.equal(p.state, 'ready')
+  assert.equal(p.installed, true)
+  assert.equal(p.executablePath, '/usr/bin/chromium')
+  assert.equal(p.source, 'system')
+})
+
+test('#302: playwright 缓存有 → 仍走 playwright（既有用户行为不变）', async () => {
+  const p = await probeChromium({
+    loadPw: async () => ({ chromium: { executablePath: () => '/pw-cache/chromium-1234/chrome' } }),
+    platform: 'linux',
+    exists: () => true,
+    which: () => undefined,
+  })
+  assert.equal(p.state, 'ready')
+  assert.equal(p.source, 'playwright')
+  assert.equal(p.executablePath, '/pw-cache/chromium-1234/chrome')
+})
+
+test('#302: 两边都没有 → 维持 browser-missing（回归）', async () => {
+  const p = await probeChromium({
+    loadPw: async () => PW_CACHE_MISSING,
+    platform: 'linux',
+    exists: () => false,
+    which: () => undefined,
+  })
+  assert.equal(p.state, 'browser-missing')
+  assert.equal(p.installed, false)
+})

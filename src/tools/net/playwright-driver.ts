@@ -13,6 +13,7 @@
  */
 
 import { createRequire } from 'node:module'
+import { findSystemChromium, type SystemProbeDeps } from './system-chromium.js'
 
 /** playwright-core 模块缺失时的安装引导——区分 CLI 安装用户 / 仓库内开发 / 桌面端。 */
 export const PLAYWRIGHT_CORE_INSTALL_HINT = [
@@ -122,21 +123,57 @@ export interface PwChromium {
 export interface LaunchHeadlessOptions {
   proxy?: { server: string; bypass?: string }
   timeoutMs?: number
+  /** 显式指定浏览器可执行文件（系统 Chromium 回退路径等）。 */
+  executablePath?: string
+  /** 测试注入：覆盖 playwright 模块加载与系统浏览器探测（默认真实实现）。 */
+  deps?: LaunchDeps
+}
+
+/** launch 的依赖注入面（默认真实实现；测试用）。 */
+export interface LaunchDeps extends SystemProbeDeps {
+  loadModule?: () => Promise<{ chromium: PwChromium }>
 }
 
 /**
- * 启动 headless chromium（无显式 executablePath——registry 结合
- * PLAYWRIGHT_BROWSERS_PATH 自动定位，桌面端打包浏览器因此零配置生效）。
- * 浏览器缺失时抛带安装提示的友好错误；其余启动错误原样上抛。
+ * #302：launch 因「playwright 自管 chromium 缺失」失败时，回退系统浏览器重试。
+ * - 非该类错误原样上抛（不吞不转）；
+ * - 系统浏览器不存在：抛原错误（保留安装提示语义）；
+ * - 系统浏览器存在但启动失败：其错误原样上抛——比「浏览器未安装」更接近真相。
+ */
+export async function launchWithSystemFallback<T>(
+  doLaunch: (executablePath?: string) => Promise<T>,
+  systemDeps?: SystemProbeDeps,
+): Promise<T> {
+  try {
+    return await doLaunch()
+  } catch (err) {
+    if (!isBrowserMissingError(err)) throw err
+    const systemExe = findSystemChromium(systemDeps)
+    if (!systemExe) throw err
+    return await doLaunch(systemExe)
+  }
+}
+
+/**
+ * 启动 headless chromium。优先 playwright 自管 registry（既有行为不变——
+ * 无显式 executablePath 时由 registry 结合 PLAYWRIGHT_BROWSERS_PATH 自动定位，
+ * 桌面端打包浏览器因此零配置生效）；registry 缺浏览器时回退系统 Chromium
+ * （#302——显式 executablePath 不再依赖 headless-shell 目录）。
+ * 两边都没有时抛带安装提示的友好错误；其余启动错误原样上抛。
  */
 export async function launchHeadlessChromium(opts: LaunchHeadlessOptions = {}): Promise<PwBrowser> {
-  const mod = (await loadPlaywrightCore()) as { chromium: PwChromium }
-  try {
-    return await mod.chromium.launch({
+  const loadModule =
+    opts.deps?.loadModule ?? (async () => (await loadPlaywrightCore()) as { chromium: PwChromium })
+  const mod = await loadModule()
+  const launch = (executablePath?: string): Promise<PwBrowser> =>
+    mod.chromium.launch({
       headless: true,
       ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
       ...(opts.proxy ? { proxy: opts.proxy } : {}),
+      ...(executablePath ? { executablePath } : {}),
     })
+  try {
+    return await launchWithSystemFallback((exe) => launch(exe ?? opts.executablePath), opts.deps)
   } catch (err) {
     if (isBrowserMissingError(err)) {
       const msg = err instanceof Error ? err.message : String(err)

@@ -4,7 +4,7 @@
 
 import { shouldCaptureResponseBody, truncateResponseBody } from './log-capture.js'
 export type { BrowserCookie } from './pw-surface.js'
-import { PLAYWRIGHT_INSTALL_HINT, isBrowserMissingError } from '../net/playwright-driver.js'
+import { PLAYWRIGHT_INSTALL_HINT, isBrowserMissingError, launchWithSystemFallback } from '../net/playwright-driver.js'
 import {
   loadPlaywright,
   type BrowserCookie,
@@ -669,11 +669,16 @@ export const playwrightDriverFactory: BrowserDebugDriverFactory = async (opts) =
   // 的 launchChromium 同口径）。挂在模块加载失败上会把排查引向错误方向。
   let context: PwContext
   try {
-    context = await mod.chromium.launchPersistentContext(opts.userDataDir, {
-      headless: opts.headless,
-      viewport: opts.viewport ?? DEFAULT_VIEWPORT,
-      args: ANTI_THROTTLE_ARGS,
-    })
+    // #302：registry 缺浏览器时回退系统 Chromium（profile 隔离语义不变——
+    // userDataDir 与 headless/viewport/args 原样透传）。
+    context = await launchWithSystemFallback((executablePath) =>
+      mod.chromium.launchPersistentContext(opts.userDataDir, {
+        headless: opts.headless,
+        viewport: opts.viewport ?? DEFAULT_VIEWPORT,
+        args: ANTI_THROTTLE_ARGS,
+        ...(executablePath ? { executablePath } : {}),
+      }),
+    )
   } catch (err) {
     if (isBrowserMissingError(err)) {
       const msg = err instanceof Error ? err.message : String(err)
