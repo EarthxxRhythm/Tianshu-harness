@@ -5,6 +5,7 @@ import { join, isAbsolute, relative } from 'path'
 import { promisify } from 'util'
 import { rivetHome } from '../config/paths.js'
 import { classifyIrreversibleEffects } from './side-effect-classifier.js'
+import { makePathClaimResolver } from './pre-write-claims.js'
 
 const execFileP = promisify(execFile)
 
@@ -33,6 +34,10 @@ export interface RollbackPreview {
 export interface OwnershipGuard {
   /** True if relPath is exclusively claimed by a different, live session. */
   isOwnedByOther(relPath: string): boolean
+  /** First other-session claim (any type) blocking `filePath`; undo/rewind
+   *  consumes this because its write path must follow the same discipline as
+   *  every write tool (acquireClaim('exclusive') rejects shared_read too). */
+  blockerOf?(filePath: string): { sessionId: string; claimType: string } | null
 }
 
 /** Minimal structural view of SessionRegistry needed for ownership checks. */
@@ -45,21 +50,17 @@ export interface ClaimLookup {
  * Build an OwnershipGuard backed by the session registry. Reaps dead sessions'
  * claims first so a crashed peer can't permanently block rollback, then treats
  * a path as another-session-owned only when a *different* session holds an
- * exclusive claim. Checks both the relative and absolute path forms because
- * claims may be stored either way.
+ * exclusive claim. The candidate key generation lives in pre-write-claims
+ * (shared with the write-tool guard) so relative/absolute/`./` path forms can
+ * never drift apart between writers and undo/rewind.
  */
 export function makeOwnershipGuard(registry: ClaimLookup, mySessionId: string, cwd: string): OwnershipGuard {
-  try { registry.reapStaleClaims() } catch { /* best-effort */ }
+  const resolver = makePathClaimResolver(registry, mySessionId, cwd)
   return {
-    isOwnedByOther(relPath: string): boolean {
-      const candidates = [relPath, join(cwd, relPath)]
-      for (const key of candidates) {
-        const claim = registry.checkClaim(key)
-        if (claim && claim.sessionId !== mySessionId && claim.claimType === 'exclusive') {
-          return true
-        }
-      }
-      return false
+    isOwnedByOther: (relPath: string): boolean => resolver.isOwnedByOther(relPath),
+    blockerOf: (filePath: string) => {
+      const blocker = resolver.blockerOf(filePath)
+      return blocker ? { sessionId: blocker.sessionId, claimType: blocker.claimType } : null
     },
   }
 }

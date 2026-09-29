@@ -48,6 +48,29 @@ describe('billed vs self-reported hit rate regression', () => {
     assert.ok(gap > 15, `expected self-reported to exceed billed by >15pp on this fixture, got ${gap.toFixed(1)}pp`)
   })
 
+  it('UsageTotals.billedHitRate reconciles with computeBilledHitRate on the same rows', () => {
+    // 两处实现（聚合器内的字段 / 独立函数）必须始终同义——注释写「同义」不算数，
+    // 这条把等价变成门禁：任一侧口径漂移（例如 retry 行在一侧被剔除）即转红。
+    const rows = parseUsageRows(fixture)
+    const { totals } = aggregateUsageRows(rows, { days: 36500 })
+    assert.equal(totals.billedHitRate, computeBilledHitRate(rows).hitRate)
+    assert.equal(totals.billedHitRate, 67.1)
+  })
+
+  it('两处账单口径实现在 retry / 用量未报告行上也不分家', () => {
+    // fixture 只含 side_path；retry（stream_attempt_aborted）与主轮用量未报告行
+    // 是另外两类只进 billed 分母的行，用合成行补上，防「一处收窄、另一处没收」。
+    const rows = parseUsageRows([
+      { t: 1, input: 100, cacheRead: 60, output: 5, usageFields: { input_tokens: 'prompt_tokens', cache_read_input_tokens: 'cached_tokens' } },
+      { t: 2, input: 100, cacheRead: 0, output: 5, usageFields: {} },
+      { t: 3, event: 'stream_attempt_aborted', input: 20, cacheRead: 0, output: 2, usageFields: { input_tokens: 'prompt_tokens' } },
+      { t: 4, event: 'side_path', kind: 'speculation', input: 1000, cacheRead: 100, output: 10 },
+    ].map(x => JSON.stringify(x)).join('\n'))
+    const { totals } = aggregateUsageRows(rows, { days: 36500 })
+    assert.equal(totals.hitRate, 60) // 主轮分母只有第一行
+    assert.equal(totals.billedHitRate, computeBilledHitRate(rows).hitRate)
+  })
+
   it('the non-usage reclaim_decision row in this fixture is ignored, not counted as a request', () => {
     const rows = parseUsageRows(fixture)
     assert.equal(rows.length, 9) // 6 main + 3 side_path; the reclaim_decision row carries no usage and is dropped

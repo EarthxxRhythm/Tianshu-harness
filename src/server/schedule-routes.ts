@@ -14,6 +14,8 @@ import type { RouteHandler } from './index.js'
 import { isAuthorizedRequest } from './auth.js'
 import {
   CronScheduler,
+  GENERIC_WRITE_DENIED_REASON,
+  SchedulerWriteDeniedError,
   createScheduledTask,
   normalizeApprovalMode,
   normalizeRetry,
@@ -51,7 +53,63 @@ function parseStatusFilter(raw: unknown): ReadonlySet<ScheduledTaskStatus> | und
   return values.length > 0 ? new Set(values) : undefined
 }
 
-export interface ScheduleRouteOptions {
+/** issue #290 — every schedule mutator first fails closed when another sidecar
+ *  owns the scheduler lock. Without this, a non-owner's empty in-memory table
+ *  is persisted as "empty + new task", silently deleting the owner's tasks. */
+function writeDeniedResult(
+  scheduler: CronScheduler,
+  options: ProcessWriteOwnershipOptions = {},
+): { status: 503; body: { error: string; message: string; detail: string } } | null {
+  const ownerSignal = options.isWriteAllowed?.()
+    ?? options.canWrite?.()
+    ?? options.isLockOwner?.()
+    ?? options.isOwner?.()
+  const message = options.writeDeniedReason?.()
+    ?? scheduler.writeDeniedReason()
+    ?? (ownerSignal === false ? GENERIC_WRITE_DENIED_REASON : undefined)
+  // `detail` 与 `message` 同文：桌面端 readErrorBody 只读 error/detail，缺 detail
+  // 时会把引导文案丢掉。error 串同时保留 scheduler_not_owner（桌面映射）与
+  // lock-owner 字样（公开仓 PR #295 的 503 断言包含 /lock/）。
+  return message
+    ? {
+        status: 503,
+        body: {
+          error: 'scheduler_not_owner: schedule writes are served by the lock-owner process (issue #290)',
+          message,
+          detail: message,
+        },
+      }
+    : null
+}
+
+/** 进程所有权信号：生产走 scheduler 注入的 CronSchedulerWriteGate；
+ *  路由单测/宿主也可直接传公开仓 PR #295 的 isWriteAllowed（或 canWrite/
+ *  isLockOwner/isOwner 别名）之一。 */
+interface ProcessWriteOwnershipOptions {
+  isWriteAllowed?: () => boolean
+  canWrite?: () => boolean
+  isLockOwner?: () => boolean
+  isOwner?: () => boolean
+  writeDeniedReason?: () => string | undefined
+}
+
+function writeErrorResult(
+  err: unknown,
+): { status: 503 | 400; body: { error: string; message?: string; detail?: string } } {
+  if (err instanceof SchedulerWriteDeniedError) {
+    return {
+      status: 503,
+      body: {
+        error: 'scheduler_not_owner: schedule writes are served by the lock-owner process (issue #290)',
+        message: err.message,
+        detail: err.message,
+      },
+    }
+  }
+  return { status: 400, body: { error: (err as Error).message } }
+}
+
+export interface ScheduleRouteOptions extends ProcessWriteOwnershipOptions {
   getStatus?: () => Promise<unknown> | undefined
   /** 付费版 v1 · T5 — unattendedAutomation Pro gate。缺省 = 允许（测试/TUI 软门禁）。 */
   isUnattendedAutomationEnabled?: () => boolean
@@ -65,6 +123,8 @@ export function buildScheduleRoutes(
   const { getStatus, isUnattendedAutomationEnabled } = options
   return {
     'POST /schedule': withAuth((body) => {
+      const denied = writeDeniedResult(scheduler, options)
+      if (denied) return denied
       const data = (body ?? {}) as {
         prompt?: string
         trigger?: { type?: string; spec?: string }
@@ -121,7 +181,7 @@ export function buildScheduleRoutes(
         scheduler.add(task)
         return { status: 201, body: task }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return writeErrorResult(err)
       }
     }, apiToken),
 
@@ -147,12 +207,16 @@ export function buildScheduleRoutes(
     // 试跑驱动信任 · Phase 1 — 立即手动触发一次（恒有人值守）。审批卡片
     // 在试跑中弹出即授权采集；试跑计入 triggerCount，与 first-runs 晋级衔接。
     'POST /schedule/:id/run-now': withAuth((_body, params) => {
+      const denied = writeDeniedResult(scheduler, options)
+      if (denied) return denied
       const ok = scheduler.runNow(params!.id!)
       if (!ok) return { status: 404, body: { error: 'Scheduled task not found or not active' } }
       return { status: 200, body: { id: params!.id!, triggered: true } }
     }, apiToken),
 
     'POST /schedule/:id/pause': withAuth((body, params) => {
+      const denied = writeDeniedResult(scheduler, options)
+      if (denied) return denied
       const data = (body ?? {}) as { enabled?: boolean }
       const enabled = data.enabled === true
       const ok = scheduler.setEnabled(params!.id!, enabled)
@@ -164,6 +228,8 @@ export function buildScheduleRoutes(
     // 与 DELETE 的区别是**不动定义**，因此其运行历史入口仍然可达。
     // 与 pause 的区别是语义：paused 是可恢复的运行态，stopped 是使命终结。
     'POST /schedule/:id/stop': withAuth((_body, params) => {
+      const denied = writeDeniedResult(scheduler, options)
+      if (denied) return denied
       const ok = scheduler.setStatus(params!.id!, 'stopped')
       if (!ok) return { status: 404, body: { error: 'Scheduled task not found' } }
       return { status: 200, body: { id: params!.id!, status: 'stopped' } }
@@ -174,6 +240,8 @@ export function buildScheduleRoutes(
     // 缺席字段不动，可选项显式 null 清除。id / 运行历史 / 生命周期状态不受影响。
     // 状态迁移不走这里（用 pause / stop），避免同一语义两个入口。
     'PATCH /schedule/:id': withAuth((body, params) => {
+      const denied = writeDeniedResult(scheduler, options)
+      if (denied) return denied
       const id = params!.id!
       const current = scheduler.get(id)
       if (!current) return { status: 404, body: { error: 'Scheduled task not found' } }
@@ -279,11 +347,13 @@ export function buildScheduleRoutes(
           },
         }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return writeErrorResult(err)
       }
     }, apiToken),
 
     'DELETE /schedule/:id': withAuth((_body, params) => {
+      const denied = writeDeniedResult(scheduler, options)
+      if (denied) return denied
       const ok = scheduler.remove(params!.id!)
       if (!ok) return { status: 404, body: { error: 'Scheduled task not found' } }
       return { status: 200, body: { removed: true } }
@@ -291,6 +361,8 @@ export function buildScheduleRoutes(
 
     // focus-change：前端 Tauri window focus/blur event 命中时调入，fire 所有
     // focus-change 类型任务。不经轮询——纯由前端事件驱动。
+    // issue #290 / PR #295：不守卫此路由——非锁主内存表恒空 → fired=0、不落盘，
+    // 无覆写面；守卫反而会把无害的 focus 事件回成 503。
     'POST /schedule/trigger-focus': withAuth(() => {
       const fired = scheduler.fireByEvent('focus-change')
       return { status: 200, body: { fired } }

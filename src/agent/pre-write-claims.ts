@@ -8,8 +8,86 @@
  * cwd 相对键形：绝对路径入参、ast_edit 的单数 path 别名，在写前写后得到同一
  * 个键，claim / ownership / ledger 三处不会各记各的。
  *
+ * 本模块同时承载「写路径 → claim 查询键」的唯一候选生成：写工具守卫、回滚
+ * 所有权 guard、undo/rewind 写盘守卫三处必须查同一组键（相对/绝对/./ 归一、
+ * 平台分隔符双形），否则 claim 明明存在却因键形不同被看不见——旁门由此而生。
+ *
  * @module pre-write-claims
  */
+import { isAbsolute, relative, resolve, sep } from 'node:path'
+
+export interface ClaimRef {
+  sessionId: string
+  claimType: string
+}
+
+/** Minimal structural view of SessionRegistry needed for claim lookups. */
+export interface PathClaimLookup {
+  checkClaim(filePath: string): ClaimRef | null
+  reapStaleClaims?(): unknown
+}
+
+export interface PathClaimResolver {
+  /** First claim held by another session that blocks a write to `filePath`.
+   *  `exclusiveOnly` narrows to exclusive claims (checkpoint rollback's older
+   *  contract); rewind uses the default so a peer's shared_read also blocks —
+   *  same as acquireClaim('exclusive') does for every write tool. */
+  blockerOf(filePath: string, opts?: { exclusiveOnly?: boolean }): (ClaimRef & { matchedPath: string }) | null
+  isOwnedByOther(filePath: string): boolean
+}
+
+/**
+ * Candidate claim keys for one file path. Claims are written by
+ * preWriteClaimPaths (usually cwd-relative) but FileHistory tracks the raw path
+ * the write tool received (often absolute). Checks must try both forms, plus
+ * `./` and platform-separator variants; otherwise a peer's exclusive claim is
+ * invisible precisely on the path shape that tool used.
+ */
+export function claimPathCandidates(cwd: string, filePath: string): string[] {
+  const keys = new Set<string>()
+  const add = (value: string | undefined): void => {
+    if (!value) return
+    keys.add(value)
+    // Windows claims may be written either `a\b` or `a/b` depending on the
+    // tool branch; try both so cross-tool claim lookups don't silently miss.
+    if (value.includes('\\') && !value.includes('/')) keys.add(value.split('\\').join('/'))
+    else if (value.includes('/') && !value.includes('\\')) keys.add(value.split('/').join('\\'))
+  }
+  add(filePath)
+  add(filePath.replace(/^\.\//, ''))
+  const abs = isAbsolute(filePath) ? filePath : resolve(cwd, filePath)
+  add(abs)
+  try {
+    const rel = relative(cwd, abs)
+    if (rel && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
+      add(rel)
+      add(`./${rel}`)
+    }
+  } catch { /* keep direct/absolute keys; a malformed path must not throw the guard */ }
+  return [...keys]
+}
+
+/**
+ * Build a resolver over the shared claim registry. Reaps crashed sessions'
+ * claims first so a dead peer cannot permanently block writes (same discipline
+ * as makeOwnershipGuard).
+ */
+export function makePathClaimResolver(registry: PathClaimLookup, mySessionId: string, cwd: string): PathClaimResolver {
+  try { registry.reapStaleClaims?.() } catch { /* best-effort */ }
+  const blockerOf: PathClaimResolver['blockerOf'] = (filePath, opts) => {
+    for (const key of claimPathCandidates(cwd, filePath)) {
+      const claim = registry.checkClaim(key)
+      if (!claim || claim.sessionId === mySessionId) continue
+      if (opts?.exclusiveOnly && claim.claimType !== 'exclusive') continue
+      return { sessionId: claim.sessionId, claimType: claim.claimType, matchedPath: key }
+    }
+    return null
+  }
+  return {
+    blockerOf,
+    isOwnedByOther: (filePath) => blockerOf(filePath, { exclusiveOnly: true }) !== null,
+  }
+}
 
 /** Extract target file paths from a unified diff's `+++ b/…` headers
  *  (deletions fall back to the preceding `--- a/…` line). Best-effort —

@@ -138,6 +138,43 @@ test('aggregateUsageRows: 无主请求输入时 hitRate 为 null', () => {
   assert.equal(agg.totals.hitRate, null)
 })
 
+test('aggregateUsageRows: billedHitRate 含侧路行，与主轮口径 hitRate 分列', () => {
+  const rows: CacheUsageRow[] = [
+    mainRow({ input: 1000, cacheRead: 900 }),
+    mainRow({ input: 3000, cacheRead: 1500 }),
+    // 侧路行若混入主轮口径会拉高 hitRate；billed 口径必须计入
+    mainRow({ input: 1000, cacheRead: 1000, sidePath: true }),
+  ]
+  const agg = aggregateUsageRows(rows, { now: NOW })
+  // 主轮 (900+1500)/(1000+3000) = 60%
+  assert.equal(agg.totals.hitRate, 60)
+  // 全量 (900+1500+1000)/(1000+3000+1000) = 68%
+  assert.equal(agg.totals.billedHitRate, 68)
+})
+
+test('aggregateUsageRows: 纯侧路行时 billedHitRate 仍有值而 hitRate 为 null', () => {
+  const agg = aggregateUsageRows([mainRow({ input: 1000, cacheRead: 800, sidePath: true })], { now: NOW })
+  assert.equal(agg.totals.hitRate, null)
+  assert.equal(agg.totals.billedHitRate, 80)
+})
+
+test('aggregateUsageRows: retry 行只进 billed 分母——sidePathRequests 为 0 不等于两口径不分叉', () => {
+  // 三类只进 billed 分母、不进主轮分母的行：side_path、retry
+  // (stream_attempt_aborted)、主轮用量未报告行。后两类的 sidePathRequests 为 0，
+  // 所以「有侧路才分叉」是个会漏整类的判据（消费方见 cache-panel 渲染用例）。
+  const rows: CacheUsageRow[] = [
+    mainRow({ input: 100, cacheRead: 60, usageFields: { input_tokens: 'prompt_tokens', cache_read_input_tokens: 'cached_tokens' } }),
+    mainRow({ input: 100, cacheRead: 0, usageFields: {} }),
+    mainRow({ input: 20, cacheRead: 0, retry: true }),
+  ]
+  const agg = aggregateUsageRows(rows, { now: NOW })
+  assert.equal(agg.totals.hitRate, 60) // 主轮分母只有第一行
+  assert.equal(agg.totals.billedHitRate, 27.3) // 60/220，三条行的 input 全计
+  assert.equal(agg.totals.sidePathRequests, 0)
+  assert.equal(agg.totals.retryRequests, 1)
+  assert.notEqual(agg.totals.billedHitRate, agg.totals.hitRate)
+})
+
 test('aggregateUsageRows: 按天分桶升序 + 按模型降序（成本优先）', () => {
   const dayMs = 86_400_000
   const rows: CacheUsageRow[] = [
@@ -226,4 +263,23 @@ test('aggregateCacheUsage: 根目录不存在时返回空聚合而非抛错', as
   assert.equal(agg.scannedFiles, 0)
   assert.equal(agg.totals.requests, 0)
   assert.equal(agg.totals.hitRate, null)
+})
+
+test('unknown cache fields and aborted attempts do not distort the main denominator or prefix metric', () => {
+  const rows = parseUsageRows([
+    { t: NOW, input: 100, cacheRead: 60, output: 5, usageFields: { input_tokens: 'prompt_tokens', cache_read_input_tokens: 'cached_tokens' }, prefix: { changed: false } },
+    { t: NOW, input: 100, cacheRead: 0, output: 5, usageFields: {} },
+    { t: NOW, event: 'stream_attempt_aborted', input: 20, cacheRead: 0, output: 2, usageFields: { input_tokens: 'prompt_tokens' }, prefix: { changed: true } },
+  ].map(x => JSON.stringify(x)).join('\n'))
+  const { totals } = aggregateUsageRows(rows, { now: NOW })
+  assert.equal(totals.hitRate, 60)
+  assert.equal(totals.input, 220)
+  assert.equal(totals.cacheCreateUnreported, 3)
+  assert.equal(totals.retryRequests, 1)
+  assert.equal(totals.hitRateUnknown, 1)
+  assert.equal(totals.prefixStableRate, 50)
+})
+test('repeated new attempt identities settle once in historical totals', () => {
+  const row = { t: NOW, input: 100, cacheRead: 60, requestId: 'r', attemptId: 'r:1' }
+  assert.equal(aggregateUsageRows(parseUsageRows([row, row].map(x => JSON.stringify(x)).join('\n')), { now: NOW }).totals.input, 100)
 })

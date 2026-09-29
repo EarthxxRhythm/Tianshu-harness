@@ -58,12 +58,6 @@ function loadCreditHelper(): string {
 function makeLongHistoryRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dispose-credit-'))
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
-  // HEAD 必须显式指向 fast-import 的目标分支：`git init` 的默认分支名由 runner 的
-  // init.defaultBranch 决定（CI 上实测是 master），HEAD 悬在未出生的分支上时下面那句
-  // `git log` 输出 0 字节 → 断言必红，且报错形如「合成仓的 log 输出应超出管道缓冲，
-  // 实际 0 字节」，与真正要锁的管道假阴性混在一起分不清。2026-09-27 公开仓 CI
-  // （ci 与 windows-smoke 两个 job 各 2 条）红的就是这个形态——本机绿、runner 红。
-  execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: dir })
   const stream: string[] = []
   for (let i = 0; i < 400; i++) {
     stream.push(
@@ -99,7 +93,7 @@ describe('dispose-community-pr.sh 的 credit 查重形态', () => {
     )
   })
 
-  test('真实历史量级下：管道形态假阴性，变量形态命中', t => {
+  test('真实历史量级下：管道形态假阴性，变量形态命中', () => {
     const dir = makeLongHistoryRepo()
     try {
       const probe = 'credit: PR #999 计入贡献'
@@ -114,17 +108,6 @@ describe('dispose-community-pr.sh 的 credit 查重形态', () => {
         { cwd: dir },
       )
       assert.equal(viaVar.status, 0, '变量形态应找到那笔 credit')
-      // 「管道形态必假阴性」是**平台相关**的复现，不是产品不变量：Windows 的 Git-Bash
-      // 管道语义不同，同量级下 piped.status 实测为 0（2026-09-27 windows-smoke 实跑）。
-      // 真正与平台无关的守卫是上一条静态用例（脚本里不得出现管道给 grep -q）；这里在
-      // Windows 上只保留「变量形态命中」这一半，并显式打出诊断——不是静默跳过。
-      if (process.platform === 'win32') {
-        t.diagnostic(
-          `win32：跳过管道假阴性复现（piped.status=${piped.status}）——该形态在本平台不复现，` +
-            '不变量由静态用例守住',
-        )
-        return
-      }
       assert.notEqual(piped.status, 0, '管道形态在本量级下应复现假阴性（这就是要锁它的原因）')
     } finally {
       rmSync(dir, { recursive: true, force: true })

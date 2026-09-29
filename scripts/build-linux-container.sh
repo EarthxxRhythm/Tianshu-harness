@@ -61,10 +61,23 @@ cleanup() { docker rm -f "$CID" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 echo "=== 拷贝源码 → 容器卷（排除 .git/target/node_modules/release/out）==="
-tar cf - --exclude=.git \
+# ⚠ AppleDouble 陷阱（2026-09-29 v3.27.0 linux 打包实证，已隔离复现）：
+# 宿主上带扩展属性（ls 的 `@` 标记）的文件，经 `docker cp` **落盘到卷时**会多出一个
+# `._<name>` 伴随文件。实测：`tar cf -` 的流里**没有** `._*` 条目（栈内只列正常文件），
+# 但落盘后 `._custom-commands.toml` 就出现了；且它**沿用源文件 mtime**（看着像上轮
+# 构建的旧残留，极易误判成"卷没清干净"）。容器里 tauri 读 permissions/*.toml 时会把它
+# 当真正的 toml → `stream did not contain valid UTF-8`，构建直接失败。
+# 判据：同目录不带 xattr 的 .toml 没有伴随文件——根因在 xattr，不在文件内容。
+# 注意 COPYFILE_DISABLE 与 --exclude='._*' 对**本问题无效**（二者管 tar 打包侧，
+# 而 `._*` 是落盘侧生成的）；保留它们只作同类问题的低成本防御。
+# 真正解决的是拷贝之后那道 find -delete（实测一次构建会残留 2743 个）。
+COPYFILE_DISABLE=1 tar cf - --exclude=.git \
   --exclude='src-tauri/target' --exclude='desktop/src-tauri/target' \
-  --exclude='*/node_modules' --exclude=release --exclude=out . \
+  --exclude='*/node_modules' --exclude=release --exclude=out \
+  --exclude='._*' . \
   | docker cp - "$CID":/work/
+# 清理已落盘的 AppleDouble 残留（tar 行为或 Docker 卷写入都可能带入）
+docker exec "$CID" sh -c "find /work -name '._*' -delete 2>/dev/null || true"
 
 echo "=== 容器内构建（${ARCH}，首次含 apt/npm/cargo 全量下载，30 分钟级）==="
 docker exec "$CID" bash /work/scripts/linux-container-build.sh

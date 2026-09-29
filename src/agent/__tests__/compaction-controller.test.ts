@@ -8,6 +8,7 @@ import { PressureMonitor } from '../../context/pressure-monitor.js'
 import type { TrajectoryEntry } from '../trajectory.js'
 import type { OaiChatRequest, OaiMessage } from '../../api/oai-types.js'
 import type { StreamCallbacks, StreamClient } from '../../api/stream-client.js'
+import type { Usage } from '../../api/types.js'
 import { extractTaskContract } from '../../context/task-contract.js'
 import type { ProviderProfile } from '../../api/provider-profile.js'
 import type { CacheAdvisor } from '../../cache/advisor.js'
@@ -566,6 +567,55 @@ describe('CompactionController', () => {
     const after = session.getMessages()
     assert.ok(after.length < 70, `expected fewer messages after partial compact, got ${after.length}`)
     assert.match(String(after[2]?.content), /partial-compact-summary/)
+
+  it('P2.1e: partial compact books an interrupted attempt through recordSummaryUsage', async () => {
+    const session = new SessionContext()
+    const chunk = 'x'.repeat(40_000)
+    const msgs = Array.from({ length: 70 }, (_, i) => ({
+      role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: chunk,
+    }))
+    session.replaceMessages(msgs)
+
+    const abortedUsage: Partial<Usage> = {
+      input_tokens: 100,
+      output_tokens: 20,
+      observation: {
+        requestId: 'compact-req', attemptId: 'compact-req:1', status: 'aborted',
+        fields: { input_tokens: 'prompt_tokens', output_tokens: 'completion_tokens' },
+      },
+    }
+    const recorded: Array<{ usage: Partial<Usage>; model: string }> = []
+    const primaryClient: StreamClient = {
+      stream: async (_request: OaiChatRequest, callbacks: StreamCallbacks) => {
+        callbacks.onTextDelta('partial summary')
+        callbacks.onStreamAttemptAborted?.({
+          usage: abortedUsage,
+          provider: 'test',
+          receivedChars: 15,
+          elapsedMs: 2,
+          errorName: 'Error',
+          errorMessage: 'boom',
+        })
+        throw new Error('boom')
+      },
+    }
+    const controller = makeController(session, {
+      contextWindow: 1_000_000,
+      primaryClient,
+      recordSummaryUsage: (usage, model) => { recorded.push({ usage, model }) },
+    })
+
+    const result = await controller.maybeCompact({ loopTurn: 0, failures: { consecutiveFailures: 0 } })
+
+    assert.equal(result.compacted, false, 'interrupted summary must not commit')
+    assert.equal(recorded.length, 1, 'aborted summary attempt must reach the side-path ledger')
+    assert.equal(recorded[0]!.usage.input_tokens, 100)
+    assert.equal(recorded[0]!.usage.output_tokens, 20)
+    assert.equal(recorded[0]!.usage.observation?.status, 'aborted')
+    assert.equal(recorded[0]!.model, 'test-model')
+  })
+
   })
 
   // P2.1c: P2 gate — on a cache-preserving provider with a hot cache, the 1M
@@ -733,6 +783,51 @@ describe('CompactionController', () => {
     assert.doesNotMatch(String(result), /<compact-summary/, 'non-covering summary must not be wrapped')
     assert.match(String(result), /用户核心需求/, 'must fall back to the structured handoff')
   })
+
+  it('P6b: llmCompact books an interrupted full-compact attempt too', async () => {
+    const session = new SessionContext()
+    session.replaceMessages([
+      { role: 'user', content: 'fix the bug' },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'continue' },
+      { role: 'assistant', content: 'done' },
+    ])
+    const abortedUsage: Partial<Usage> = {
+      input_tokens: 50,
+      output_tokens: 5,
+      observation: {
+        requestId: 'full-compact-req', attemptId: 'full-compact-req:1', status: 'aborted',
+        fields: { input_tokens: 'prompt_tokens', output_tokens: 'completion_tokens' },
+      },
+    }
+    const recorded: Array<{ usage: Partial<Usage>; model: string }> = []
+    const primaryClient: StreamClient = {
+      stream: async (_request: OaiChatRequest, callbacks: StreamCallbacks) => {
+        callbacks.onTextDelta('partial summary')
+        callbacks.onStreamAttemptAborted?.({
+          usage: abortedUsage,
+          provider: 'test',
+          receivedChars: 15,
+          elapsedMs: 2,
+          errorName: 'Error',
+          errorMessage: 'boom',
+        })
+        throw new Error('boom')
+      },
+    }
+    const controller = makeController(session, {
+      contextWindow: 1_000_000,
+      primaryClient,
+      recordSummaryUsage: (usage, model) => { recorded.push({ usage, model }) },
+    })
+
+    const result = await controller.llmCompact()
+
+    assert.equal(result, null, 'interrupted full compact must return null')
+    assert.equal(recorded.length, 1, 'aborted summary attempt must reach the side-path ledger')
+    assert.equal(recorded[0]!.usage.observation?.status, 'aborted')
+  })
+
 
   // P7 (E2E): drive a real partial compact over a long history and assert the
   // re-injected task-anchor still carries objective / file-scope / user

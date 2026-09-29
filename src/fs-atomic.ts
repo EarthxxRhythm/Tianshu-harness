@@ -1,7 +1,25 @@
 import { writeFileSync, renameSync, unlinkSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { mkdir, writeFile, rename, unlink } from 'node:fs/promises'
+import { mkdir, writeFile, rename, unlink, open } from 'node:fs/promises'
+
+/** Publish only after file contents are synced. Directory sync is POSIX-only. */
+export async function writeFileAtomicDurableAsync(filePath: string, data: string | Buffer): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true })
+  const temporary = atomicTmpPath(filePath)
+  try {
+    const file = await open(temporary, 'wx', 0o600)
+    try { await file.writeFile(data); await file.sync() } finally { await file.close() }
+    await rename(temporary, filePath)
+    if (process.platform !== 'win32') {
+      const directory = await open(dirname(filePath), 'r')
+      try { await directory.sync() } finally { await directory.close() }
+    }
+  } catch (error) {
+    try { await unlink(temporary) } catch { /* only our temporary file */ }
+    throw error
+  }
+}
 
 /** 本工具临时文件的唯一形态（issue #125）：带固定标记 `.rivet-atomic-<8hex>.tmp`，
  *  清理时才能与用户自己的 `<任意名>.<8位hex>.tmp` 区分开。 */

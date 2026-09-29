@@ -300,8 +300,11 @@ describe('migrateDeepseekMaxTokens — one-shot bump 64000 → 384000', () => {
       assert.ok(ds)
       assert.equal(ds.maxTokens, 384_000)
       const models = ds.models
-      assert.equal(models[0]?.maxTokens, 384_000, 'vision-exp model maxTokens should be migrated')
-      assert.equal(models[1]?.maxTokens, 384_000, 'v4-flash model maxTokens should be migrated')
+      assert.equal(models[0]?.maxTokens, 384_000, 'vision-exp（已退役、不在 preset）保留迁移值')
+      // v4-flash 是 preset 现存模型：加载时 preset 的 maxTokens 接管（现为 256K，
+      // 对齐官方 harness 的 DEFAULT_MAX_TOKENS），迁移写下的 384K 被覆盖。
+      // 即：已知 id 由 preset 兜底，本迁移只对 preset 不认识的 id 有效。
+      assert.equal(models[1]?.maxTokens, 256_000, 'v4-flash（preset 现存）由 preset 的 maxTokens 接管')
     })
   })
 
@@ -366,7 +369,7 @@ describe('migrateDeepseekMaxTokens — one-shot bump 64000 → 384000', () => {
       // deepseek provider loaded from preset (DEFAULT_CONFIG)
       const ds = config.provider.providers['deepseek']
       assert.ok(ds)
-      assert.equal(ds.maxTokens, 384_000, 'preset default should be used when no user override')
+      assert.equal(ds.maxTokens, 256_000, 'preset default should be used when no user override')
     })
   })
 

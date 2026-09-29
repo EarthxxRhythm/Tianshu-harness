@@ -31,6 +31,10 @@
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
   <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
   <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://atomgit.com/huiliyi37/Tianshu-harness"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/star/badge.svg" alt="AtomGit Star"></a>
+  <a href="https://github.com/huiliyi37/Tianshu-harness/releases"><img src="https://img.shields.io/github/downloads/huiliyi37/Tianshu-harness/total?logo=github&label=downloads" alt="GitHub downloads"></a>
+  <a href="https://www.npmjs.com/package/tianshu-tui"><img src="https://img.shields.io/npm/dm/tianshu-tui?label=npm%20tianshu-tui" alt="npm tianshu-tui downloads"></a>
+  <a href="https://www.npmjs.com/package/tianshu-harness"><img src="https://img.shields.io/npm/dm/tianshu-harness?label=npm%20tianshu-harness" alt="npm tianshu-harness downloads"></a>
 </p>
 
 <p align="center">
@@ -367,4 +371,3 @@ node dist/cli/entry.js
 ## 致谢
 
 - 桌面端「自定义壁纸与分区玻璃」功能的**设计**参考了 <a href="https://github.com/elysia395/dsh-wallpaper-engine">dsh-wallpaper-engine</a>（MIT License）；该功能为天枢独立实现，未引入上游代码，参考范围与许可全文见 <a href="THIRD-PARTY-NOTICES.md">THIRD-PARTY-NOTICES.md</a>。
-- 特别致谢 dsh-wallpaper-engine 的作者与核心开发——<a href="https://github.com/elysia395">@elysia395</a>、<a href="https://github.com/YV3507">@YV3507</a>、<a href="https://github.com/yuxilao">@yuxilao</a>、<a href="https://github.com/oneincase">@oneincase</a>：四位作为**壁纸引擎渲染的技术顾问**，在壁纸合成与分区玻璃材质的设计、实现过程中提供了指导。

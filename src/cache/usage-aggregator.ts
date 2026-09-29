@@ -32,10 +32,18 @@ export interface CacheUsageRow {
   cacheRead: number
   cacheCreate: number
   output: number
+  prefixStable?: boolean
   sidePath: boolean
+  retry?: boolean
+  usageFields?: Record<string, string>
 }
 
 export interface UsageTotals {
+  prefixStableRate?: number
+  prefixSamples?: number
+  retryRequests?: number
+  cacheCreateUnreported?: number
+  hitRateUnknown?: number
   /** main request count */
   requests: number
   /** side-path (speculation / summary) request count */
@@ -46,6 +54,18 @@ export interface UsageTotals {
   output: number
   /** weighted ΣcacheRead/Σinput over main rows, percent 0–100; null when no input */
   hitRate: number | null
+  /**
+   * ΣcacheRead/Σinput over **every** row the provider charged for — side_path,
+   * retry (`stream_attempt_aborted`) and usage-unreported rows included.
+   * Same semantics as `computeBilledHitRate` (billed-hit-rate.ts); kept as its
+   * own number rather than folded into `hitRate` because the two answer
+   * different questions, and the gap between them is the only place a
+   * regression that grows side-path/retry traffic at a poor hit rate shows up
+   * (the bill rises, `hitRate` doesn't move). Equivalence with
+   * `computeBilledHitRate` is pinned by a reconciliation case in
+   * `billed-hit-rate-regression.test.ts` (same fixture, both computations).
+   */
+  billedHitRate: number | null
   /** total cost in the model's billing currency (per computeUsageCost) */
   cost: number
   /** money saved by cache hits: ΣcacheRead × (missPrice − hitPrice) */
@@ -88,7 +108,8 @@ function num(value: unknown): number | undefined {
 
 /** Parse cache-log JSONL content into usage rows. Non-usage event rows and malformed lines are dropped. */
 export function parseUsageRows(content: string): CacheUsageRow[] {
-  return content.split(/\r?\n/).flatMap(line => {
+  const attempts = new Set<string>()
+  return content.split(/\r?\n/).reverse().flatMap(line => {
     if (!line.trim()) return []
     let parsed: unknown
     try {
@@ -98,8 +119,13 @@ export function parseUsageRows(content: string): CacheUsageRow[] {
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
     const record = parsed as Record<string, unknown>
+    if (typeof record.requestId === 'string' && typeof record.attemptId === 'string') {
+      const key = JSON.stringify([record.provider, record.model, record.requestId, record.attemptId])
+      if (attempts.has(key)) return []
+      attempts.add(key)
+    }
     const event = record.event
-    if (event !== undefined && event !== 'side_path') return []
+    if (event !== undefined && event !== 'side_path' && event !== 'stream_attempt_aborted') return []
     const t = num(record.t)
     const input = num(record.input)
     if (t === undefined || input === undefined) return []
@@ -112,11 +138,20 @@ export function parseUsageRows(content: string): CacheUsageRow[] {
       cacheCreate: num(record.cacheCreate) ?? 0,
       output: num(record.output) ?? 0,
       sidePath: event === 'side_path',
+      ...(record.prefix && typeof (record.prefix as { changed?: unknown }).changed === 'boolean'
+        ? { prefixStable: !(record.prefix as { changed: boolean }).changed } : {}),
+      ...(event === 'stream_attempt_aborted' ? { retry: true } : {}),
+      ...(record.usageFields && typeof record.usageFields === 'object' ? { usageFields: record.usageFields as Record<string, string> } : {}),
     }]
-  })
+  }).reverse()
 }
 
 interface Accumulator {
+  prefixSamples: number
+  prefixStable: number
+  retryRequests: number
+  cacheCreateUnreported: number
+  hitRateUnknown: number
   requests: number
   sidePathRequests: number
   input: number
@@ -132,6 +167,7 @@ interface Accumulator {
 
 function newAccumulator(): Accumulator {
   return {
+    prefixSamples: 0, prefixStable: 0, retryRequests: 0, cacheCreateUnreported: 0, hitRateUnknown: 0,
     requests: 0, sidePathRequests: 0,
     input: 0, cacheRead: 0, cacheCreate: 0, output: 0,
     mainInput: 0, mainCacheRead: 0,
@@ -140,11 +176,16 @@ function newAccumulator(): Accumulator {
 }
 
 function addRow(acc: Accumulator, row: CacheUsageRow, pricing: ModelConfig['pricing']): void {
-  if (row.sidePath) acc.sidePathRequests += 1
+  if (!row.sidePath && row.prefixStable !== undefined) { acc.prefixSamples++; if (row.prefixStable) acc.prefixStable++ }
+  if (row.usageFields && !row.usageFields.cache_creation_input_tokens) acc.cacheCreateUnreported++
+  if (row.retry) acc.retryRequests++
+  else if (row.sidePath) acc.sidePathRequests += 1
   else {
     acc.requests += 1
-    acc.mainInput += row.input
-    acc.mainCacheRead += row.cacheRead
+    if (row.cacheRead <= row.input && (!row.usageFields || (row.usageFields.input_tokens && row.usageFields.cache_read_input_tokens))) {
+      acc.mainInput += row.input
+      acc.mainCacheRead += row.cacheRead
+    } else acc.hitRateUnknown++
   }
   acc.input += row.input
   acc.cacheRead += row.cacheRead
@@ -166,6 +207,10 @@ function addRow(acc: Accumulator, row: CacheUsageRow, pricing: ModelConfig['pric
 function toTotals(acc: Accumulator): UsageTotals {
   const round = (v: number) => Math.round(v * 1_000_000) / 1_000_000
   return {
+    ...(acc.prefixSamples ? { prefixSamples: acc.prefixSamples, prefixStableRate: Math.round(acc.prefixStable / acc.prefixSamples * 1000) / 10 } : {}),
+    ...(acc.retryRequests ? { retryRequests: acc.retryRequests } : {}),
+    ...(acc.cacheCreateUnreported ? { cacheCreateUnreported: acc.cacheCreateUnreported } : {}),
+    ...(acc.hitRateUnknown ? { hitRateUnknown: acc.hitRateUnknown } : {}),
     requests: acc.requests,
     sidePathRequests: acc.sidePathRequests,
     input: acc.input,
@@ -173,6 +218,7 @@ function toTotals(acc: Accumulator): UsageTotals {
     cacheCreate: acc.cacheCreate,
     output: acc.output,
     hitRate: acc.mainInput > 0 ? Math.round(acc.mainCacheRead / acc.mainInput * 1000) / 10 : null,
+    billedHitRate: acc.input > 0 ? Math.round(acc.cacheRead / acc.input * 1000) / 10 : null,
     cost: round(acc.cost),
     savings: round(acc.savings),
   }

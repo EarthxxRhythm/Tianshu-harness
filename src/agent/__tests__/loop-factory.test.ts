@@ -4,6 +4,7 @@ import type { AgentLoop } from '../loop.js'
 import { buildRuntimeSnapshot, createToolExecutionController, createSidePathUsageRecorder, createReclaimDecisionRecorder, createTurnStreamController, resolveDisabledHookIds, resolveHookDisabledEnv } from '../loop-factory.js'
 import { runGateCompletion, type GateCompletionClient } from '../gate-completion.js'
 import { TurnCacheObservability } from '../cache-log-observability.js'
+import type { Usage } from '../../api/types.js'
 
 /**
  * Safety net for the loop.ts decomposition (mid-loop). `buildRuntimeSnapshot`
@@ -183,6 +184,62 @@ test('createSidePathUsageRecorder skips empty usage (no totals pollution, no log
   createSidePathUsageRecorder(self)('llm-speculation', {})
   assert.equal(booked.length, 0)
 })
+
+test('createSidePathUsageRecorder keeps all-unknown aborted attempts (identity-stamped log)', async () => {
+  const { mkdtempSync, readFileSync, existsSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const tmp = mkdtempSync(join(tmpdir(), 'sidepath-unknown-'))
+  const prevEnv = process.env.RIVET_SESSION_DIR
+  process.env.RIVET_SESSION_DIR = tmp
+  try {
+    const booked: Array<Record<string, unknown>> = []
+    const self = {
+      cwd: '/work',
+      session: { addSidePathUsage: (u: Record<string, unknown>) => { booked.push(u) } },
+      config: { sessionId: 'unknown-session', providerName: 'deepseek-spark', promptEngine: { getModel: () => 'deepseek-v4' } },
+    } as unknown as AgentLoop
+
+    const unknownUsage: Partial<Usage> = {
+      input_tokens: 0,
+      output_tokens: 0,
+      observation: {
+        requestId: 'req-unknown',
+        attemptId: 'req-unknown:1',
+        status: 'aborted',
+        fields: {},
+      },
+    }
+    createSidePathUsageRecorder(self)('compact-summary', unknownUsage)
+
+    assert.equal(booked.length, 1, 'all-unknown observation must still be booked (dedupe identity preserved)')
+    const logPath = join(tmp, 'unknown-session', 'cache-log.jsonl')
+    const deadline = Date.now() + 2_000
+    let line: Record<string, unknown> | undefined
+    while (line === undefined) {
+      if (Date.now() > deadline) throw new Error('cache-log line never appeared for unknown usage')
+      if (existsSync(logPath)) {
+        const content = readFileSync(logPath, 'utf-8').trim()
+        if (content) {
+          try { line = JSON.parse(content) as Record<string, unknown> } catch { /* appendFile may still be mid-write */ }
+        }
+      }
+      if (line !== undefined) break
+      await new Promise(r => setTimeout(r, 10))
+    }
+    assert.equal(line.event, 'side_path')
+    assert.equal(line.requestId, 'req-unknown')
+    assert.equal(line.attemptId, 'req-unknown:1')
+    assert.equal(line.status, 'aborted')
+    assert.equal(line.input, 0)
+    assert.equal(line.output, 0)
+  } finally {
+    if (prevEnv === undefined) delete process.env.RIVET_SESSION_DIR
+    else process.env.RIVET_SESSION_DIR = prevEnv
+  }
+})
+
 
 /**
  * Reclaim-decision telemetry (plan task 7): every gate decision — committed
@@ -499,4 +556,52 @@ test('createTurnStreamController 把持久化剥图接到 session（Grok ServerR
   replaced.length = 0
   deps.persistStrippedImages({ removedCount: 2, uniqueUrlCount: 2 })
   assert.equal(replaced.length, 0, 'blame 不明时保持 wire-only（服务端只指认请求，不指认图）')
+})
+
+test('production stream wiring rolls back failed text and persists per-attempt estimates', async () => {
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { SessionContext } = await import('../context.js')
+  const tmp = await mkdtemp(join(tmpdir(), 'attempt-wiring-'))
+  const previous = process.env.RIVET_SESSION_DIR
+  process.env.RIVET_SESSION_DIR = tmp
+  try {
+    const session = new SessionContext()
+    const self = fakeLoop({ session, streamedText: 'previous;', lastPrewarmAt: 0,
+      prewarmController: { maybePrewarm() {} },
+      config: { sessionId: 'fixture', promptEngine: { getModel: () => 'fixture' },
+        client: { stream: async (_request: unknown, cb: import('../../api/stream-client.js').StreamCallbacks) => {
+          cb.onTextDelta('abcdefghijklmnop')
+          cb.onStreamAttemptAborted?.({ requestId: 'r', attemptId: 'a', provider: 'fixture',
+            receivedChars: 16, elapsedMs: 1, errorName: 'Error', errorMessage: 'interrupted',
+            usage: { input_tokens: 100, output_tokens: 0,
+              observation: { requestId: 'r', attemptId: 'a', status: 'aborted', fields: { input_tokens: 'prompt_tokens' } } } })
+          throw new Error('interrupted')
+        } },
+      },
+    })
+    const result = await createTurnStreamController(self).streamTurn({
+      request: { model: 'fixture', max_tokens: 4096, messages: [] }, turn: 0, lastTurnTextFingerprint: '',
+      callbacks: { onTextDelta() {}, onThinkingDelta() {}, onToolUse() {}, onError() {} },
+    })
+    assert.equal(result.streamError?.message, 'interrupted')
+    assert.equal(self.streamedText, 'previous;', 'orchestrator fallback text must not contain a failed attempt')
+    assert.equal(session.getTotalUsage().output_tokens, 4)
+    assert.equal(session.getTotalUsage().estimated, true)
+    let entry: Record<string, unknown> | undefined
+    const deadline = Date.now() + 2000
+    while (!entry && Date.now() < deadline) {
+      try { entry = JSON.parse((await readFile(join(tmp, 'fixture/cache-log.jsonl'), 'utf8')).trim()) }
+      catch { await new Promise(resolve => setTimeout(resolve, 10)) }
+    }
+    assert.equal(entry?.attemptId, 'a')
+    assert.equal(entry?.output, 4)
+    assert.equal(entry?.estimated, true)
+    assert.deepEqual(entry?.usageFields, { input_tokens: 'prompt_tokens' })
+  } finally {
+    if (previous === undefined) delete process.env.RIVET_SESSION_DIR
+    else process.env.RIVET_SESSION_DIR = previous
+    await rm(tmp, { recursive: true, force: true })
+  }
 })

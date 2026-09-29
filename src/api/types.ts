@@ -71,6 +71,14 @@ export interface ToolDefinition {
 }
 
 export interface Usage {
+  cacheCoverage?: { input: number; read: number; observed: number; unknown: number; creationUnknown: number }
+  observation?: {
+    requestId: string
+    attemptId: string
+    status: 'complete' | 'aborted'
+    fields: Record<string, string>
+    prefix?: { system: string; tools: string; history: string; chars: number; messages: number; changed: boolean; firstChange?: number }
+  }
   /**
    * Total prompt tokens, cache-INCLUSIVE: input_tokens = uncached + cache_read
    * + cache_creation. This is DeepSeek/OpenAI native semantics (prompt_tokens
@@ -89,4 +97,10 @@ export interface Usage {
    * provider does not surface the split. Text tokens = output_tokens - reasoning_tokens.
    */
   reasoning_tokens?: number
+  /**
+   * True when output_tokens is a local estimate because the stream attempt
+   * aborted before the provider reported any output usage. Never set on
+   * provider-measured usage (including a provider-reported explicit 0).
+   */
+  estimated?: boolean
 }

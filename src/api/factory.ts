@@ -233,6 +233,7 @@ export function createProviderClient(
     apiKey: params.apiKey,
     model: params.model,
     maxTokens: params.maxTokens,
+    contextWindow: provider.models?.find(m => m.id === params.model)?.contextWindow,
     auth: params.auth,
     thinking: provider.thinking as 'enabled' | 'disabled' | undefined,
     thinkingStallTimeoutMs: provider.thinkingStallTimeoutMs ?? wire?.thinkingStallTimeoutMs,

@@ -172,7 +172,7 @@ export function mergeUsage(
 ): Usage | Partial<Usage> | undefined {
   if (!a) return b
   if (!b) return a
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)] as Array<keyof Usage>)
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)] as Array<Exclude<keyof Usage, 'observation' | 'cacheCoverage' | 'estimated'>>)
   const merged: Partial<Usage> = {}
   for (const key of keys) {
     const left = a[key]
@@ -197,7 +197,7 @@ export function subtractUsage(
 ): Partial<Usage> {
   const out: Partial<Usage> = {}
   if (!total) return out
-  for (const key of Object.keys(total) as Array<keyof Usage>) {
+  for (const key of Object.keys(total) as Array<Exclude<keyof Usage, 'observation' | 'cacheCoverage' | 'estimated'>>) {
     const t = total[key]
     if (typeof t !== 'number') continue
     const p = prior?.[key]

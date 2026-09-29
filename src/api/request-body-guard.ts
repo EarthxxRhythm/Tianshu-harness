@@ -49,6 +49,8 @@ export const GUARD_HEAD_CHARS = 2000
 export const GUARD_TAIL_CHARS = 1000
 
 export interface BodyGuardOptions {
+  /** Fail without silently rewriting content; the session owner must archive first. */
+  preserveContent?: boolean
   /** 体积上限（字节）。未配置 = 不启用护栏（默认）——不做量体、不截断、不预警。 */
   limitBytes?: number
   /**
@@ -200,6 +202,7 @@ export function notifyBodyGuard(
 }
 
 export interface BodyGuardOutcome {
+  serializedBody?: string
   /** 可能被截断的**新**体（入参未被修改；未截断时返回原引用）。 */
   body: Record<string, unknown>
   /** wire 体字节数；护栏未启用（limitBytes 非有限值）时不做量体，恒为 0。 */
@@ -224,7 +227,7 @@ export class RequestBodyTooLargeError extends Error {
     limitBytes: number,
     contributors: { messageIndex: number; role: string; bytes: number }[],
     /** 抛错前是否真的降级过历史内容（截工具输出/移图片）；没降过就不许说「已截断」（issue #251）。 */
-    info: { truncated?: boolean } = {},
+    info: { truncated?: boolean; preserved?: boolean } = {},
   ) {
     const top = contributors
       .slice(0, 5)
@@ -240,10 +243,10 @@ export class RequestBodyTooLargeError extends Error {
         : ''
     super(
       `请求体 ${formatByteSize(bytes)} 超出传输上限 ${formatByteSize(limitBytes)}，` +
-      (info.truncated ? '已截断历史工具输出/移除较早图片仍超限。' : '已无可截断的历史内容。') +
+      (info.preserved ? '原历史和图片已保留，本次请求尚未发送。' : info.truncated ? '已截断历史工具输出/移除较早图片仍超限。' : '已无可截断的历史内容。') +
       `最大来源：${top || '（无法定位）'}${dispersedNote}。` +
       '处理：用 /compact 压缩本会话，或新开会话继续；若 baseUrl 走第三方中转，中转常有更小的 body 限制；' +
-      '也可调大（或清空）该 provider 的 maxBodyBytes 配置。',
+      (info.preserved ? '请减少当前附件；模型服务的传输上限不能通过调大配置突破。' : '也可调大（或清空）该 provider 的 maxBodyBytes 配置。'),
     )
     this.name = 'RequestBodyTooLargeError'
     this.bytes = bytes
@@ -324,10 +327,12 @@ export function enforceRequestBodyLimit(
   const shape = opts.shape ?? 'openai'
 
   const warnBytes = opts.warnBytes ?? Math.floor(limitBytes * GUARD_NEAR_LIMIT_RATIO)
-  const original = measureBodyBytes(body)
+  const serializedBody = opts.preserveContent ? JSON.stringify(body) : undefined
+  const original = serializedBody === undefined ? measureBodyBytes(body) : Buffer.byteLength(serializedBody)
   if (original <= limitBytes) {
     return {
       body,
+      ...(serializedBody === undefined ? {} : { serializedBody }),
       bytes: original,
       limitBytes,
       degraded: [],
@@ -337,6 +342,9 @@ export function enforceRequestBodyLimit(
   }
 
   const rawMessages = body.messages
+  if (opts.preserveContent) {
+    throw new RequestBodyTooLargeError(original, limitBytes, topContributors(Array.isArray(rawMessages) ? rawMessages : []), { preserved: true })
+  }
   if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
     throw new RequestBodyTooLargeError(original, limitBytes, topContributors([]))
   }

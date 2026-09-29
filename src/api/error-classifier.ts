@@ -21,6 +21,7 @@ export type ErrorCategory =
   | 'auth_error'
   | 'client_error'
   | 'context_overflow'
+  | 'request_body_too_large'
   | 'image_strip'
   | 'stream_parse'
   | 'malformed_response'
@@ -34,7 +35,7 @@ export type ErrorCategory =
  *  以此为单一真源：字段拼错在 loadConfig 时就报错，而不是静默失效。 */
 export const ERROR_CATEGORIES = [
   'rate_limit', 'overloaded', 'server_error', 'timeout', 'auth_error',
-  'client_error', 'context_overflow', 'image_strip', 'stream_parse', 'malformed_response',
+  'client_error', 'context_overflow', 'request_body_too_large', 'image_strip', 'stream_parse', 'malformed_response',
   'reasoning_repetition', 'reasoning_echo', 'request_invariant', 'tls_intercept', 'unknown',
 ] as const satisfies readonly ErrorCategory[]
 
@@ -172,38 +173,22 @@ function classifyByStatus(status: number, payloadHadImages?: boolean): Classifie
     }
   }
 
-  // 413 Payload Too Large — 两种成因在 wire 层长得一模一样，区分所需的信息只有
-  // API client 有：它知道自己刚发出去的请求体里有没有 image_url。client 在错误上
-  // 留 `payloadHadImages` 标记，这里据此分流：
-  //   true      → 图片过重：剥离 image_url 后重发一次（剥离由 client 在重试时执行）
-  //   false     → 请求本就没图：纯上下文超限，重发同一个体必然再 413，不可重试
-  //   undefined → 第三方网关转述的 413（client 没打过标）：乐观按 image_strip，
-  //               client 侧无图可剥时会即时失败，不会空转一轮
+  // 413 分流：wire 层无法区分「图片过重」与「上下文超限」（都是 413），区分所需的
+  // 信息只有 API client 有——它知道自己刚发出去的体里有没有 image_url，并在错误上留
+  // payloadHadImages 标记（见 extractPayloadHadImages / openai-client 的剥图状态机）。
+  //   有图 → image_strip：剥图重发一次。图片是唯一「模型可见且体积大」的成分，工具
+  //          输出排在它之前（原始输出可再取回），user 文本一个字不动。
+  //   无图 → context_overflow：重发同样的体必然再 413，不可重试，指引压缩上下文。
+  //   无标记（第三方网关转述 413）→ 保持乐观的 image_strip（Grok Build 同款纪律）。
   if (status === 413) {
     if (payloadHadImages === false) {
-      return {
-        retryable: false,
-        retryDelayMs: 0,
-        shouldReconnect: false,
-        category: 'context_overflow',
-        // 发送前护栏默认关闭 → 用户会先吃到这个 413。文案直接给出两条出路：
-        // 临时压缩，或把该 provider 的 maxBodyBytes 配上（超限自动截断历史工具输出）。
-        userMessage:
-          'Payload too large (413) — the request exceeds the provider limit. ' +
-          '可用 /compact 压缩本会话；或在该 provider 配置里设 maxBodyBytes（字节）' +
-          '启用发送前体积护栏（超限时自动截断历史工具输出）。',
-        maxRetries: 0,
-      }
+      return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
+        category: 'context_overflow', maxRetries: 0,
+        userMessage: '请求体超过传输上限（413），且请求内已无图片可剥离——请压缩上下文后重发。' }
     }
-    return {
-      retryable: true,
-      retryDelayMs: 0,
-      shouldReconnect: false,
-      category: 'image_strip',
-      userMessage: 'Payload too large — stripping images and retrying.',
-      maxRetries: 1,
-      stripImages: true,
-    }
+    return { retryable: true, retryDelayMs: 0, shouldReconnect: false,
+      category: 'image_strip', maxRetries: 1, stripImages: true,
+      userMessage: 'Image payload too large — stripping images and retrying.' }
   }
 
   // Auth errors
@@ -464,12 +449,20 @@ function classifyByPattern(error: unknown): ClassifiedError {
       retryable: false,
       retryDelayMs: 0,
       shouldReconnect: false,
-      category: 'context_overflow',
+      category: 'request_body_too_large',
       userMessage: message, // 护栏的文案本身就是可行动的中文指引，原样透出
       maxRetries: 0,
     }
   }
 
+  if (name === 'ContextBudgetExceededError') {
+    return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
+      category: 'context_overflow', userMessage: message, maxRetries: 0 }
+  }
+  if (name === 'ImageInputRejectedError') {
+    return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
+      category: 'client_error', userMessage: message, maxRetries: 0 }
+  }
   // Context overflow patterns
   if (
     /prompt is too long|context_length_exceeded|max.*token|context.*overflow/i.test(message)
@@ -571,6 +564,18 @@ function extractPayloadHadImages(error: unknown): boolean | undefined {
  * Priority: status code → error name → message pattern → fallback.
  */
 export function classifyApiError(error: unknown): ClassifiedError {
+  if (error instanceof Error && error.name === 'RequestBodyTooLargeError') {
+    return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
+      category: 'request_body_too_large', userMessage: error.message, maxRetries: 0 }
+  }
+  if (error instanceof Error && ['ContextPreparationError', 'ImageInputRejectedError'].includes(error.name)) {
+    return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
+      category: 'client_error', userMessage: error.message, maxRetries: 0 }
+  }
+  if (error instanceof Error && /context_length_exceeded|prompt is too long|maximum context length/i.test(error.message)) {
+    return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
+      category: 'context_overflow', userMessage: error.message, maxRetries: 0 }
+  }
   // 请求重建不变式违规：不是网络/上游故障，重试只会重复同一份损坏字节，
   // 且必须**穿透**故障转移（FallbackStreamClient 只接管五类上游错误）——
   // 让它落进任何可重试/可接管类别，一次前缀损坏就会变成「悄悄换个 provider
@@ -595,6 +600,16 @@ export function classifyApiError(error: unknown): ClassifiedError {
       retryable: true, retryDelayMs: 0, shouldReconnect: false,
       category: 'reasoning_repetition', userMessage: error.message, maxRetries: 1,
       reasoningRepeatCorrect: true,
+    }
+  }
+  // Incomplete SSE: socket closed without the terminal `[DONE]` marker. This is
+  // an upstream/transport failure (not a prompt problem), so keep retry +
+  // provider fallback enabled. Name-based to avoid importing the client class
+  // into the classifier (openai-client imports this module).
+  if (error instanceof Error && error.name === 'IncompleteStreamError') {
+    return {
+      retryable: true, retryDelayMs: 1000, shouldReconnect: true,
+      category: 'stream_parse', userMessage: error.message, maxRetries: 2,
     }
   }
   // Non-SSE 200 (openai-client content-type gate): the endpoint answered but
@@ -691,6 +706,8 @@ export function errorRecoveryGuidance(error: unknown): string {
       return '网络超时：检查网络/代理后重发；反复超时用 /doctor 体检'
     case 'auth_error':
       return '认证失败：/connect 检查 API Key；订阅型（codex）用 /login 重新授权'
+    case 'request_body_too_large':
+      return '请求体超过传输上限：减少附件或压缩历史'
     case 'context_overflow':
       return '上下文超限：/compact 压缩，或 /handoff 交接后开新会话'
     case 'client_error':

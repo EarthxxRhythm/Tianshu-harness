@@ -157,13 +157,13 @@ function estimateOaiMessageTokensUncached(msg: OaiMessage): number {
     // 按真实尺寸分块（image-tokens.ts），不按张数——一张 1280×800 视口图是 1105
     // token，整页长图到 1785，旧的"每张 765"只对 1024 方图成立。base64 载荷本身
     // 不计入文本 token：供应商单独编码它。
-    let textLen = 0
+    let textTokens = 0
     let imageTokens = 0
     for (const part of msg.content) {
-      if (part.type === 'text') textLen += part.text.length
+      if (part.type === 'text') textTokens += estimateOaiMessageTokens({ role: 'user', content: part.text })
       else imageTokens += estimateImageTokens(part.image_url.url)
     }
-    return Math.ceil(textLen / 4) + imageTokens
+    return textTokens + imageTokens
   } else {
     content = msg.content as string
   }

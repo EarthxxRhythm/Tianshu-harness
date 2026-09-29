@@ -3,6 +3,8 @@ import { renderPlanExecutingBlock } from '../prompt/volatile.js'
 import type { KnowledgeCandidate } from '../memory/essence-gate.js'
 import { ControlPlaneController } from './control-plane-adapters.js'
 import { SessionContext } from './context.js'
+import { RequestContextController } from './request-context-controller.js'
+import type { ContextBudgetSnapshot } from '../server/protocol.js'
 import { SessionPersist, getSessionDir, shouldAutoWriteHandoff } from './session-persist.js'
 import { attachSessionPersistListener } from './session-persist-listener.js'
 import { PrewarmCache } from './prewarm.js'
@@ -181,6 +183,29 @@ export function formatActivePlanPointer(plan: { slug: string; title: string; sel
 const IDLE_COMPACTION_DELAY_MS = 60_000
 
 export class AgentLoop {
+  readonly requestContext = new RequestContextController(this)
+  getContextBudget(): ContextBudgetSnapshot | undefined { return this.requestContext.snapshot }
+  recordContextBudget(budget: ContextBudgetSnapshot): ContextBudgetSnapshot { return this.requestContext.record(budget) }
+  prepareBudgetedRequest(build: () => import('../api/oai-types.js').OaiChatRequest, callbacks: AgentCallbacks): Promise<import('../api/oai-types.js').OaiChatRequest> {
+    return this.requestContext.prepare(build, callbacks)
+  }
+  compactContextBudget(force = false): Promise<boolean> { return this.requestContext.compact(force) }
+  async compactContext(): Promise<boolean> {
+    if (this._running) throw new Error('请等待当前任务结束后整理上下文')
+    if (!this.config.promptEngine.getRequestBudgetPolicy()) throw new Error('当前模型尚未接入安全手动整理')
+    this._running = true
+    try {
+      await this.cancelIdleCompaction()
+      this.abortController = new AbortController()
+      const changed = await this.compactContextBudget(true)
+      this.requestContext.refreshSnapshot()
+      return changed
+    } finally { this._running = false; this.abortController = null }
+  }
+  async commitBudgetHistory(expected: import('../api/oai-types.js').OaiMessage[], candidate: import('../api/oai-types.js').OaiMessage[]): Promise<void> {
+    if (!this._persistCommitCompaction) throw new Error('当前会话无法安全提交压缩历史')
+    await this._persistCommitCompaction(expected, candidate)
+  }
     session!: SessionContext;
     config!: AgentConfig;
   /** Agent 创建时间——shutdown 自动 handoff 据此判断会话内是否已手动交接
@@ -231,6 +256,7 @@ export class AgentLoop {
   private _idleAbort: AbortController | null = null
   private _idleSettled: Promise<void> | null = null
   /** P0-1 persist drain: awaits pending async writes so tool results survive abort. */
+  private _persistCommitCompaction?: ReturnType<typeof attachSessionPersistListener>['commitCompaction']
   private _persistDrain: (() => Promise<void>) | null = null
   /** 当前 run 的 callbacks（zen_phase 事件在构造期 arm 时可能还没有） */
   private zenPhaseCallbacks: AgentCallbacks | null = null
@@ -1053,7 +1079,7 @@ export class AgentLoop {
     
     // 初始化 SessionPersist 用于 fuzzy checkpoint
     if (this.config.sessionId) {
-      this.persist = new SessionPersist(this.config.sessionId, this.cwd)
+      this.persist = this.config.sessionPersist ?? new SessionPersist(this.config.sessionId, this.cwd)
 
       // P1: Initialize session metadata with model info
       this.persist.initMetadata({
@@ -1069,6 +1095,7 @@ export class AgentLoop {
       // shutdowns (Ctrl+C, crash, network drop) don't lose the session.
       const listener = attachSessionPersistListener({ session: this.session, persist: this.persist })
       this._persistDrain = listener.drain
+      this._persistCommitCompaction = listener.commitCompaction
     }
     // Zen Mode：会话启动 arm（首轮请求前收窄工具面到读面；resume 按 meta 恢复相位）。
     // 必须晚于 persist 初始化——arm 的 resume 判定要读 meta。
@@ -2385,6 +2412,7 @@ export class AgentLoop {
    *  a dangling jsonl at the old path). */
   async drainPersistWrites(): Promise<void> {
     await this._persistDrain?.()
+    await this.persist?.drainFrozenSnapshots()
   }
 
   async runPostSession(callbacks: AgentCallbacks): Promise<void> {
@@ -2414,6 +2442,7 @@ export class AgentLoop {
   private async runPostSessionWith(ctx: RuntimeHookContext): Promise<void> {
     // P0-1: drain pending async persist writes so tool results survive abort/Ctrl+C.
     await this._persistDrain?.()
+    await this.persist?.drainFrozenSnapshots()
     await this.runtimeHooks.runPostSession(ctx)
     if (this.config.sessionRegistry) {
       try { this.config.sessionRegistry.cleanupOldEvents(2 * 60 * 60 * 1000) } catch { /* ignore */ }
@@ -2670,6 +2699,8 @@ export class AgentLoop {
    * ratio 都清算。不在闲时做 50% 档的主动陈旧轮截断。
    */
   async runIdleCompaction(): Promise<void> {
+    // Native request budgeting owns all rewrites; idle time alone must not break a hot prefix.
+    if (this.config.promptEngine.getRequestBudgetPolicy()) return
     if (this._running || this._idleCompacting) return
     if (!this.config.compact?.enabled) return
     const ctxWindow = this.config.contextWindow ?? 1_000_000

@@ -1,6 +1,7 @@
 import type { PostToolRuntimeHook, RuntimeHookContext, RuntimeToolEvent } from '../runtime-hooks.js'
 import type { AdvisoryBus } from '../advisory-bus.js'
 import type { FailureClass } from '../failure-classifier.js'
+import { extractPatchTargetPaths } from '../../tools/apply-patch.js'
 
 /**
  * Error Diagnosis Hook — postTool 注入对应错误的用户向诊断建议。
@@ -80,6 +81,10 @@ const REGISTRY: Partial<Record<FailureClass, DiagnosisEntry>> = {
     diagnosis: '不稳定测试——同一测试在不同运行中结果不一致。',
     userAction: '测试可能不稳定。多次运行确认——如果每次失败不同，标记为 flaky 并单独排查（通常是并发/时序问题）。',
   },
+  patch_rejected: {
+    diagnosis: '补丁被 git apply 拒绝——diff 格式损坏、上下文与文件当前内容不匹配、或目标文件未被 git 跟踪。',
+    userAction: '不要原样重发同一补丁。先 read_file 读取目标文件当前内容，核对 hunk 头 @@ 行数计数，基于真实内容重新生成 diff；目标是本会话新建文件时改用 edit_file / write_file。',
+  },
 }
 
 const ADVISORY_PREAMBLE = '【天枢·诊断】'
@@ -92,7 +97,18 @@ export interface ErrorDiagnosisHookDeps {
   obligations?: Pick<import('../obligation-tracker.js').ObligationTracker, 'recordFailureSignal'>
 }
 
-const EDIT_TOOLS = new Set(['edit_file', 'hash_edit', 'write_file', 'ast_edit'])
+const EDIT_TOOLS = new Set(['edit_file', 'hash_edit', 'write_file', 'ast_edit', 'apply_patch'])
+
+/** apply_patch 的目标埋在 diff 的 +++ 头里，没有 file_path 字段。 */
+function extractFailureTarget(tool: RuntimeToolEvent): string | undefined {
+  if (tool.name === 'apply_patch') {
+    const diff = typeof tool.input?.diff === 'string' ? tool.input.diff : undefined
+    if (!diff) return undefined
+    const targets = extractPatchTargetPaths(diff)
+    return targets.length > 0 ? targets.join(',') : undefined
+  }
+  return typeof tool.input?.file_path === 'string' ? tool.input.file_path : tool.target
+}
 
 export function createErrorDiagnosisHook(deps: ErrorDiagnosisHookDeps): PostToolRuntimeHook {
   let lastFiredTurn = -1
@@ -107,9 +123,7 @@ export function createErrorDiagnosisHook(deps: ErrorDiagnosisHookDeps): PostTool
     run(ctx: RuntimeHookContext, tool: RuntimeToolEvent): void {
       // 编辑工具成功时重置失败计数——必须在 isError 检查之前，
       // 因为成功事件 .isError=false 会被提前返回。
-      const failureTarget = typeof tool.input?.file_path === 'string'
-        ? tool.input.file_path as string
-        : tool.target
+      const failureTarget = extractFailureTarget(tool)
       if (EDIT_TOOLS.has(tool.name) && tool.success && failureTarget) {
         editFailCounts.delete(failureTarget)
       }

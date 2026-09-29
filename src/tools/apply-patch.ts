@@ -219,9 +219,10 @@ export const APPLY_PATCH_TOOL: Tool = {
       for (const t of targets) incrementEditFailCount(t.abs)
       return {
         content: rolledBack
-          ? `补丁应用失败（已回滚到补丁前状态）：${result.error}`
-          : `补丁应用失败：${result.error}`,
+          ? `补丁应用失败（已回滚到补丁前状态）：${result.error}\n\n${patchFailureGuidance(result.error)}`
+          : `补丁应用失败：${result.error}\n\n${patchFailureGuidance(result.error)}`,
         isError: true,
+        errorKind: 'patch_rejected',
       }
     }
 
@@ -393,6 +394,23 @@ async function unstagePatchTargets(cwd: string, targets: PatchTarget[], abortSig
 }
 
 const APPLY_PATCH_MAX_UI_LINES = 600
+
+/** git apply 拒绝原因 → 恢复引导。判据顺序即优先级：not-in-index 最可操作
+ * （worker 新建文件未入索引是 --3way 的结构性死局，重发同一补丁永远失败），
+ * corrupt patch 是 diff 格式问题，patch failed / not-match-index 是上下文漂移
+ * （worktree 与补丁预期状态不符）。 */
+function patchFailureGuidance(gitError: string): string {
+  if (/does not exist in index/i.test(gitError)) {
+    return '恢复建议：目标文件未被 git 跟踪（本会话新建的文件不在索引中），git apply --3way 无法三路回退，重发同一补丁必然再失败。改用 edit_file / write_file 直接编辑该文件。'
+  }
+  if (/corrupt patch|unrecognized input/i.test(gitError)) {
+    return '恢复建议：diff 格式损坏——最常见是 hunk 头 @@ -a,b +c,d @@ 的行数计数与 hunk 体实际行数不符。重新生成 diff 并逐 hunk 核对计数；单点修改改用 edit_file（无计数负担）更稳。'
+  }
+  if (/patch failed|does not apply|does not match index|already exists/i.test(gitError)) {
+    return '恢复建议：补丁上下文与文件当前内容不匹配（上下文漂移或存在未暂存改动）。先 read_file 读取目标文件当前内容，基于真实内容重新生成 diff——不要原样重发同一补丁。'
+  }
+  return '恢复建议：先 read_file / git diff 查看目标当前状态，再重新生成 diff 重试。'
+}
 
 /** Normalize backslashes to forward slashes only in diff header lines so a
  *  patch created on Windows (or mentioning Windows paths) stays valid for

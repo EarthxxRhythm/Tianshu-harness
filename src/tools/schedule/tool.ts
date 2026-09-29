@@ -21,7 +21,7 @@
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import type { Tool } from '../types.js'
-import { getActiveScheduler, isUnattendedAutomationAllowed, resolveTaskStatus, validateTriggerOrThrow, type CronTriggerType } from '../../server/cron-scheduler.js'
+import { getActiveScheduler, isScheduleWriteAllowed, isUnattendedAutomationAllowed, resolveTaskStatus, validateTriggerOrThrow, type CronScheduler, type CronTriggerType } from '../../server/cron-scheduler.js'
 
 const triggerSchema = z.object({
   type: z.enum(['interval', 'cron', 'oneshot', 'startup', 'app-open']),
@@ -48,6 +48,29 @@ export function isSchedulerAvailable(): boolean {
 const noScheduler = (): { content: string } => ({
   content: '调度器不可用——定时任务需要 `rivet serve`（桌面端/无头模式）。CLI 交互模式没有 cron 调度器。',
 })
+
+/** issue #290 — a non-owner sidecar has an empty in-memory table; allowing the
+ *  agent tool to add/remove would persist "empty + change" over the lock
+ *  owner's task definitions. Refuse with the same guidance as the HTTP 503. */
+const writeDeniedReason = (scheduler: CronScheduler): string | undefined => scheduler.writeDeniedReason()
+
+/** 公开仓 PR #295 口径的全局写门（serve.ts 注入 lock.isOwner()）。 */
+const globalWriteDenied = (): { content: string; isError: true } | undefined => (
+  isScheduleWriteAllowed()
+    ? undefined
+    : {
+        content: '调度写入被拒：本进程未持有调度锁——多开 sidecar 共用同一数据目录时，'
+          + '定时任务写操作由锁主进程受理（issue #290）。请在锁主 sidecar 的会话或自动化面板操作。',
+        isError: true,
+      }
+)
+
+const writeDenied = (scheduler: CronScheduler): { content: string; isError: true } | undefined => {
+  const byGlobalGate = globalWriteDenied()
+  if (byGlobalGate) return byGlobalGate
+  const reason = writeDeniedReason(scheduler)
+  return reason ? { content: `定时任务写入不可用：本进程未持有调度锁——${reason}`, isError: true } : undefined
+}
 
 /** schedule_create — 在对话中创建一个定时任务。 */
 export const SCHEDULE_CREATE_TOOL: Tool = {
@@ -81,6 +104,8 @@ export const SCHEDULE_CREATE_TOOL: Tool = {
     const { input, cwd: sessionCwd } = params
     const scheduler = getActiveScheduler()
     if (!scheduler) return noScheduler()
+    const denied = writeDenied(scheduler)
+    if (denied) return denied
     const parsed = createSchema.safeParse(input)
     if (!parsed.success) {
       return { content: `输入不合法：${parsed.error.message}` }
@@ -136,9 +161,14 @@ export const SCHEDULE_LIST_TOOL: Tool = {
   async execute() {
     const scheduler = getActiveScheduler()
     if (!scheduler) return noScheduler()
+    const deniedReason = writeDeniedReason(scheduler)
     const tasks = scheduler.list()
     if (tasks.length === 0) {
-      return { content: '当前没有定时任务。用 schedule_create 新建一个。' }
+      return {
+        content: deniedReason
+          ? `当前进程未持有调度器锁，读不到任务定义：${deniedReason}`
+          : '当前没有定时任务。用 schedule_create 新建一个。',
+      }
     }
     const lines = tasks.map(t => {
       // 三态直显（issue #236）——stopped 与 paused 都保留定义，但语义不同：
@@ -149,7 +179,7 @@ export const SCHEDULE_LIST_TOOL: Tool = {
       return `- ${t.id} · ${t.trigger.type}${t.trigger.spec ? ` "${t.trigger.spec}"` : ''} · fires=${t.triggerCount}${state}\n  ${summary}`
     })
     return {
-      content: `共 ${tasks.length} 个定时任务：\n${lines.join('\n')}`,
+      content: `共 ${tasks.length} 个定时任务：\n${lines.join('\n')}${deniedReason ? `\n\n⚠️ ${deniedReason}` : ''}`,
     }
   },
   requiresApproval: () => false,
@@ -173,6 +203,8 @@ export const SCHEDULE_DELETE_TOOL: Tool = {
   async execute({ input }) {
     const scheduler = getActiveScheduler()
     if (!scheduler) return noScheduler()
+    const denied = writeDenied(scheduler)
+    if (denied) return denied
     const id = typeof input.id === 'string' ? input.id : ''
     if (!id) {
       return { content: '缺少 "id" 参数。' }

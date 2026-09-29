@@ -28,6 +28,7 @@ export const DEFAULT_STREAM_RULES: readonly StreamRule[] = [
 ]
 
 export interface TurnStreamCallbacks {
+  onContextBudget?: StreamCallbacks['onContextBudget']
   onTextDelta: (text: string) => void
   onThinkingDelta: (thinking: string) => void
   onToolUse: (id: string, name: string, input: Record<string, unknown>) => void
@@ -49,10 +50,12 @@ export interface TurnStreamCallbacks {
 }
 
 export interface TurnStreamDeps {
+  recordContextBudget?: (budget: import('../server/protocol.js').ContextBudgetSnapshot) => import('../server/protocol.js').ContextBudgetSnapshot
   client: StreamClient
   abortSignal: AbortSignal
   getStreamedTextLength: () => number
   appendStreamedText: (text: string) => void
+  truncateStreamedText: (length: number) => void
   getLastPrewarmAt: () => number
   setLastPrewarmAt: (position: number) => void
   maybePrewarm: (text: string) => void
@@ -141,6 +144,27 @@ export class TurnStreamController {
     const compiledRules = rules.map(r => ({ ...r, regex: new RegExp(r.pattern, 'si') }))
     let triggeredRule: StreamRule | undefined
 
+    let wireBudget = input.request.contextBudget
+    const initialTextLength = this.deps.getStreamedTextLength()
+    const abortedAttempts = new Set<string>()
+    const partialChars = () => Math.max(turnDisplayBuffer.length + thinkingAccum.length,
+      collectedBlocks.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length
+        : block.type === 'thinking' ? block.thinking.length : block.type === 'tool_use' ? JSON.stringify(block.input).length : 0), 0))
+    const discardAttempt = () => {
+      collectedBlocks.length = 0
+      toolUses.length = 0
+      thinkingAccum = turnDisplayBuffer = stopReason = ''
+      chunkHistory.length = thinkingChunkHistory.length = 0
+      this.deps.truncateStreamedText(initialTextLength)
+      this.deps.setLastPrewarmAt(Math.min(this.deps.getLastPrewarmAt(), initialTextLength))
+      streamStartMs = now()
+      ttftMs = undefined
+    }
+    const publishBudget = (budget: import('../server/protocol.js').ContextBudgetSnapshot) => {
+      wireBudget = budget
+      const current = this.deps.recordContextBudget?.(budget) ?? budget
+      if (current.requestId === budget.requestId) input.callbacks.onContextBudget?.(current)
+    }
     const streamCallbacks: StreamCallbacks = {
       onTextDelta: (text) => {
         if (text.length > 0) markFirstProviderOutput()
@@ -191,7 +215,6 @@ export class TurnStreamController {
         collectedBlocks.push(block)
         if (isToolUse(block)) {
           toolUses.push({ id: block.id, name: block.name, input: block.input, argsTruncated: block.argsTruncated })
-          input.callbacks.onToolUse(block.id, block.name, block.input)
 
           // TTSR: match stream rules against the bash command the model is about
           // to run — NOT its prose. Aborts before a dangerous command executes,
@@ -210,11 +233,19 @@ export class TurnStreamController {
         }
       },
       onStopReason: (reason, usage) => {
+        if (wireBudget && (usage.input_tokens ?? 0) > 0) {
+          publishBudget({ ...wireBudget,
+            sampledAt: Date.now(), source: 'measured', measuredInputTokens: usage.input_tokens,
+            inputTokens: usage.input_tokens!, generatedTokens: usage.output_tokens,
+            state: usage.input_tokens! > wireBudget.inputBudget ? 'blocked' : usage.input_tokens! >= wireBudget.inputBudget * 0.85 ? 'warning' : 'ready',
+          })
+        }
         stopReason = reason
         this.deps.addUsage(usage)
         if (ttftMs !== undefined) this.deps.recordTtft?.(ttftMs)
         if (usage.cache_read_input_tokens !== undefined || usage.cache_creation_input_tokens !== undefined) {
           this.deps.recordTurnCache(input.turn, {
+            observation: usage.observation,
             input_tokens: usage.input_tokens ?? 0,
             output_tokens: usage.output_tokens ?? 0,
             cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
@@ -237,11 +268,25 @@ export class TurnStreamController {
       onReasoningEchoRecovered: () => {
         input.callbacks.onReasoningEchoRecovered?.()
       },
+      onContextBudget: publishBudget,
       onBodyGuard: (info) => {
         input.callbacks.onBodyGuard?.(info)
       },
       onStreamAttemptAborted: (info) => {
-        this.deps.recordStreamAttemptAborted?.(info)
+        const attemptId = info.attemptId ?? info.usage?.observation?.attemptId
+        if (attemptId && abortedAttempts.has(attemptId)) return
+        if (attemptId) abortedAttempts.add(attemptId)
+        const fields = info.usage?.observation?.fields
+        const outputKnown = fields ? fields.output_tokens !== undefined : info.usage?.output_tokens !== undefined
+        const chars = Math.max(info.receivedChars, partialChars())
+        const usage = !outputKnown && chars > 0
+          ? { ...info.usage, output_tokens: Math.ceil(chars / 4), estimated: true }
+          : info.usage
+        // Settle each failed attempt separately, including explicit provider zero.
+        // Keep fields unchanged: local estimates are not provider observations.
+        if (this.deps.recordStreamAttemptAborted) this.deps.recordStreamAttemptAborted({ ...info, usage })
+        else if (usage) this.deps.addUsage(usage)
+        discardAttempt()
       },
       onToolCallDelta: () => {
         markFirstProviderOutput()
@@ -266,16 +311,20 @@ export class TurnStreamController {
       if (err instanceof RuleTriggeredError) {
         triggeredRule = err.rule
       } else {
-        const estimatedOut = this.deps.getStreamedTextLength() + collectedBlocks.reduce((sum, block) => (
-          sum + (block.type === 'text' ? block.text.length : 0)
-        ), 0)
-        if (estimatedOut > 0) {
-          this.deps.addUsage({ output_tokens: Math.ceil(estimatedOut / 4) })
-        }
+        // Legacy clients without attempt callbacks still need an estimate. The
+        // delta and its final content block describe the same output, not two costs.
+        const chars = partialChars()
+        if (chars > 0) this.deps.addUsage({ output_tokens: Math.ceil(chars / 4), estimated: true })
+        toolUses.length = 0
         streamError = err as Error
       }
     }
 
+    // Tool hints may stream early; actionable tool notifications belong only
+    // to a completed attempt, after safety rules and transport checks pass.
+    if (!streamError && !triggeredRule) {
+      for (const tool of toolUses) input.callbacks.onToolUse(tool.id, tool.name, tool.input)
+    }
     const dedupedBuffer = stripIntraTurnRepetition(turnDisplayBuffer)
     const nextFingerprint = displayTextFingerprint(dedupedBuffer)
 

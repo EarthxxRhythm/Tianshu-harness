@@ -119,7 +119,7 @@ describe('provider presets', () => {
     const next = deepseek.models.find(m => m.id === 'deepseek-flash')
     assert.ok(next, 'deepseek-flash 必须在 deepseek 预设模型列表')
     assert.equal(next.contextWindow, 1_000_000)
-    assert.equal(next.maxTokens, 384_000)
+    assert.equal(next.maxTokens, 256_000, '默认请求输出 256K（对齐官方 harness 的 DEFAULT_MAX_TOKENS；能力上限另由 DEEPSEEK_MAX_OUTPUT 守）')
     assert.equal(next.supportsVision, true, '原生多模态声明视觉')
     assert.deepEqual(next.pricing, { input: 1, output: 2, cacheRead: 0.02, cacheWrite: 1 })
     assert.equal(next.reasoningEffort, 'medium')

@@ -23,6 +23,7 @@ export interface GateCompletionClient {
       onTextDelta: (text: string) => void
       onThinkingDelta: () => void
       onContentBlock: () => void
+      onStreamAttemptAborted?: (info: import('../api/stream-client.js').StreamAttemptAbortedInfo) => void
       onStopReason: (reason: unknown, usage?: Partial<Usage>) => void
       onError: (err: Error) => void
     },
@@ -52,6 +53,7 @@ export async function runGateCompletion(
     onTextDelta: text => { chunks.push(text) },
     onThinkingDelta: () => {},
     onContentBlock: () => {},
+    onStreamAttemptAborted: info => { if (info.usage) recordSidePath('essence_gate', info.usage) },
     onStopReason: (_reason, usage) => {
       recordSidePath('essence_gate', usage ?? {})
     },

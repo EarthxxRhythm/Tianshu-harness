@@ -15,6 +15,7 @@ describe('verify-cache-hit-rate offline summary', () => {
       {
         turn: 1,
         hitRate: '95.0%',
+        input: 1050,
         cacheRead: 950,
         cacheCreate: 100,
         ttftMs: 100,
@@ -35,12 +36,12 @@ describe('verify-cache-hit-rate offline summary', () => {
     assert.match(formatOfflineCacheSummary(summary), /unknown/)
   })
 
-  it('weights hit rate by cache tokens and uses it for advisory', () => {
+  it('weights hit rate by inclusive input tokens and uses it for advisory', () => {
     const low = summarizeCacheLog([
-      { turn: 1, hitRate: '99.9%', cacheRead: 90, cacheCreate: 10 },
-      { turn: 2, hitRate: '99.9%', cacheRead: 1, cacheCreate: 9 },
+      { turn: 1, hitRate: '99.9%', input: 100, cacheRead: 90, cacheCreate: 10 },
+      { turn: 2, hitRate: '99.9%', input: 10, cacheRead: 1, cacheCreate: 9 },
     ])
-    const healthy = summarizeCacheLog([{ turn: 1, hitRate: '1.0%', cacheRead: 90, cacheCreate: 10 }])
+    const healthy = summarizeCacheLog([{ turn: 1, hitRate: '1.0%', input: 100, cacheRead: 90, cacheCreate: 10 }])
     const unknown = summarizeCacheLog([{ turn: 1 }])
 
     assert.equal(low.turn1Plus.hitRate.average, 82.72727272727273)

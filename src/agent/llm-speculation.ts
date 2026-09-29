@@ -247,6 +247,7 @@ export function createLlmSpeculationEngine(deps: LlmSpeculationEngineDeps): LlmS
         onContentBlock: () => {},
         // onStopReason can fire more than once (finish_reason frame, then the
         // usage frame) — only book the call once real token counts arrive.
+        onStreamAttemptAborted: info => { if (info.usage) deps.recordUsage?.(info.usage) },
         onStopReason: (_reason, u) => {
           if (u && (u.input_tokens ?? 0) > 0) {
             usage = u

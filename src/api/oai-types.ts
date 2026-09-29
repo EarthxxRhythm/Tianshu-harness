@@ -22,7 +22,7 @@ export interface OaiTextPart {
 }
 export interface OaiImagePart {
   type: 'image_url'
-  image_url: { url: string } // data:image/...;base64,... or https URL
+  image_url: { url: string; detail?: 'auto' | 'low' | 'high' | 'original' }
 }
 export type OaiContentPart = OaiTextPart | OaiImagePart
 
@@ -37,7 +37,7 @@ export interface OaiAssistantMessage {
   role: 'assistant'
   content: string | null
   tool_calls?: OaiToolCall[]
-  /** Provider reasoning content. Stored locally; stripped before sending to DeepSeek (400 if present). */
+  /** Provider reasoning content; official DeepSeek tool requests must echo it intact. */
   reasoning_content?: string
 }
 
@@ -199,6 +199,8 @@ export interface OaiToolDefinition {
 
 /** Request body for OpenAI-compatible Chat Completions APIs. */
 export interface OaiChatRequest {
+  /** Internal accounting, never serialized as a provider field. */
+  contextBudget?: import('../server/protocol.js').ContextBudgetSnapshot
   model: string
   messages: OaiMessage[]
   tools?: OaiToolDefinition[]

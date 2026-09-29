@@ -273,6 +273,7 @@ export class TurnStepProducer {
     }
 
     this.self.session.addUserMessage(userInput, images)
+    this.self.requestContext.activeUserMessage = this.self.session.getMessages().at(-1)
     const turnMode = classifyTurnMode(userInput, this.self.taskContract)
     this.lastTurnMode = turnMode
     const actionable = turnMode !== 'chat'
@@ -779,11 +780,11 @@ export class TurnStepProducer {
     this.self.refreshReliabilityDecision()
 
     _tb = Date.now()
-    await this.self.compaction.enforceContextCeiling()
+    if (!this.self.config.promptEngine.getRequestBudgetPolicy()) await this.self.compaction.enforceContextCeiling()
     debugLog(`[turn-boundary] turn=${turn} enforceContextCeiling: ${Date.now() - _tb}ms`)
     // A2: enforceContextCeiling can trigger LLM compact (30s timeout).
     if (this.self.abortController!.signal.aborted) {
-      if (!assistantResponded && !userMessageConsumed) this.self.session.removeLastMessage()
+      if (!assistantResponded && !userMessageConsumed && !this.self.config.promptEngine.getRequestBudgetPolicy()) this.self.session.removeLastMessage()
       callbacks.onAbort(this.self.abortReason())
       return { action: 'abort' }
     }
@@ -856,7 +857,7 @@ export class TurnStepProducer {
     _tb = Date.now()
     await this.self.config.promptEngine.refreshGitContextIfNeeded(this.self.cwd)
     debugLog(`[turn-boundary] turn=${turn} refreshGitContext: ${Date.now() - _tb}ms`)
-    const request = this.self.config.promptEngine.buildOaiRequest(
+    const request = await this.self.prepareBudgetedRequest(() => this.self.config.promptEngine.buildOaiRequest(
       this.self.session.getMessages(),
       this.self.recentToolHistory,
       this.self.config.contextWindow,
@@ -867,7 +868,7 @@ export class TurnStepProducer {
         },
         writeProbe: createWriteEvidenceProbe(this.self.cwd),
       },
-    )
+    ), callbacks)
 
     // ── CVM egress metering ──
     // 盘古呼吸：CVM 保护的资源（context）也是它消耗的资源。账记在字节真正写进

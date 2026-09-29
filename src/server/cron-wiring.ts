@@ -60,6 +60,10 @@ export class CronWiring {
     this.cwd = config.cwd
     this.unsubscribeLockLost = this.lock?.onLockLost(() => {
       this.scheduler.stop()
+      // issue #290：锁丢失后写门立即转 false，事件触发器若继续回调
+      // fireByEvent 会抛 SchedulerWriteDeniedError；先拆监听，避免 watcher
+      // 回调把异常抛进事件循环。
+      stopEventTriggers()
     })
 
     // 接线：scheduler 触发 → TaskRegistry 创建 cron 任务。
@@ -91,8 +95,16 @@ export class CronWiring {
   /** 启动调度器。多进程部署时先抢锁。 */
   async start(): Promise<CronWiringStatus> {
     if (this.lock) {
-      this.lock.acquire()
-      if (!this.lock.isOwner()) {
+      const lock = this.lock
+      lock.acquire()
+      // issue #290：先接管写门，再暴露任何写入口。非锁主的 scheduler 不得
+      // add/remove/update/persist——它没 loadSchedule，内存表恒空，落盘就是
+      // 整表覆写锁主的任务定义。
+      this.scheduler.setWriteGate({
+        canWrite: () => lock.isOwner(),
+        deniedReason: () => lock.ownerDescription(),
+      })
+      if (!lock.isOwner()) {
         return {
           schedulerRunning: false,
           lockOwner: false,
@@ -100,7 +112,12 @@ export class CronWiring {
           scheduledCount: this.countScheduled(),
         }
       }
+      // 锁主在第一个 await 之前同步载入磁盘定义：恢复陈旧任务的 await 窗口里
+      // 若有写请求进来，空表 + 新任务同样会覆写文件（owner-side 同型旁门）。
+      this.scheduler.load()
     }
+    // 无锁（单进程）不注入写门，但保留调用方在 CronSchedulerConfig 里显式配置的
+    // 门——测试/宿主自有所有权判定不该被 CronWiring 清掉。
 
     // 恢复陈旧任务（进程重启后 running → timed_out）
     await this.registry.recoverStaleTasks()
@@ -147,6 +164,16 @@ export class CronWiring {
   /** 注入 runtime 池（延后接线，供 ingress spec Phase 2 就绪后使用） */
   setRuntimePool(pool: RuntimePool): void {
     this.registry.setRuntimePool(pool)
+  }
+
+  /** issue #290 — true when this process may write the schedule table. */
+  isLockOwner(): boolean {
+    return this.lock ? this.lock.isOwner() : true
+  }
+
+  /** Denial reason when another sidecar owns the lock; undefined when writable. */
+  writeDeniedReason(): string | undefined {
+    return this.lock && !this.lock.isOwner() ? this.lock.ownerDescription() : undefined
   }
 
   /** 获取当前状态 */

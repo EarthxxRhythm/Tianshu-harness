@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto'
+import type { Usage } from './types.js'
+import { assertCompleteAttachments } from './attachment-integrity.js'
+import { UsageSettlement } from './usage-settlement.js'
 import type { StreamClient, WireDivergence } from './stream-client.js'
 import type { StreamCallbacks } from './stream-client.js'
 import { normalizeOaiMessage, oaiMessagesHaveImageParts, stripOaiImageParts } from './oai-types.js'
@@ -10,6 +14,10 @@ import { withStructuredRetry } from './retry-engine.js'
 import { parseRetryAfterMs } from './error-classifier.js'
 import { resolveWireEffort } from './provider.js'
 import { ReasoningRepetitionGuard, REASONING_REPETITION_CORRECTION } from './reasoning-repetition.js'
+import { deepSeekImageLimitError } from '../context/image-input-limits.js'
+import { isOfficialDeepSeek, deepSeekBudgetPolicy, buildContextBudget, assertContextBudget, DEEPSEEK_BODY_LIMIT } from '../context/request-budget.js'
+import type { ContextBudgetSnapshot } from '../server/protocol.js'
+import { classifyApiError } from './error-classifier.js'
 import { normalizeBaseUrl } from './endpoint-map.js'
 import { sanitizeMessageContent, countContentChars, FULL_SANITIZE_CHARS } from '../utils/sanitize.js'
 import { parseOpenAIError } from './error-hints.js'
@@ -42,15 +50,26 @@ import type { ProviderRetryConfig } from '../config/retry-schema.js'
  * deltas AFTER finish_reason; flushing eagerly fed `{}` to the tool, which then
  * failed with a misleading "X is required").
  */
-/** Full-content djb2 for the wire-level prefix probe — hashes every character
- *  so any single-byte change in the final payload is detectable. */
-function wireHash(s: string): string {
-  let h = 5381
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) + h + s.charCodeAt(i)) | 0
+/** Hash only; diagnostics never include prompt or image contents. */
+function wireHash(s: string): string { return createHash('sha256').update(s).digest('hex') }
+
+/**
+ * SSE transport ended before the provider's terminal `data: [DONE]` marker.
+ *
+ * A clean socket close is not by itself proof of a complete generation: the
+ * connection may be cut by a proxy, an idle LB, or a retryable transport reset
+ * after a partial body. Previously that EOF was settled as `complete`, so the
+ * discarded partial turn looked successful and no `stream_attempt_aborted`
+ * breadcrumb existed. Treat it as an incomplete attempt and let the retry /
+ * fallback policy decide the next step.
+ */
+export class IncompleteStreamError extends Error {
+  constructor() {
+    super('OpenAI SSE stream ended before [DONE] completion marker (incomplete stream)')
+    this.name = 'IncompleteStreamError'
   }
-  return `${h}:${s.length}`
 }
+
 
 function tryParseToolArguments(raw: string): Record<string, unknown> | null {
   if (raw.trim().length === 0) return {}
@@ -107,6 +126,7 @@ function salvageFirstJsonObject(raw: string): Record<string, unknown> | null {
 }
 
 export interface OpenAIClientConfig {
+  contextWindow?: number
   baseUrl: string
   apiKey: string
   model: string
@@ -464,6 +484,7 @@ export class OpenAIClient implements StreamClient {
   private mapWireMessages(
     messages: OaiMessage[],
     opts?: {
+      toolsPresent?: boolean
       preserveReasoning?: boolean
       /** 该历史数组已派发过 → 忽略粘性的 preservedThinkingProtocol，保持原字节。 */
       suppressStickyPreserve?: boolean
@@ -480,6 +501,11 @@ export class OpenAIClient implements StreamClient {
       // Some turns omit the field entirely (model skipped thinking). Absent vs
       // present changes wire bytes and breaks prefix cache at the next user
       // boundary (8396ac51: truncations aligned with first no-reasoning assistant).
+      if (isOfficialDeepSeek(this.config.baseUrl, this.config.model) && opts?.toolsPresent && this.config.thinking !== 'disabled') {
+        // Keep the existing empty-field normalization for tool turns with no
+        // recorded reasoning; never replace non-empty historical reasoning.
+        return hasToolCalls && !('reasoning_content' in m) ? { ...m, reasoning_content: '' } : m
+      }
       if (isPreservedThinking && hasToolCalls && !('reasoning_content' in m)) {
         return { ...m, reasoning_content: '' }
       }
@@ -506,6 +532,12 @@ export class OpenAIClient implements StreamClient {
     }).map(normalizeOaiMessage)
   }
 
+  previewContextRequest(request: OaiChatRequest): OaiChatRequest {
+    return { ...request, model: request.model || this.config.model, max_tokens: request.max_tokens ?? this.config.maxTokens,
+      messages: this.mapWireMessages(request.messages, { toolsPresent: !!request.tools?.length,
+        suppressStickyPreserve: this.requestInvariant.hasObserved(request) }) }
+  }
+
   async stream(
     request: OaiChatRequest,
     callbacks: StreamCallbacks,
@@ -516,8 +548,10 @@ export class OpenAIClient implements StreamClient {
     // 粘性 preservedThinkingProtocol（reasoning_echo 自愈）只作用于此后的**新**数组，
     // 否则「侧路复用主请求 / 故障转移重放同一 request」会看到不同的字节。
     // 判断必须早于 observe()（observe 会登记本次派发，之后恒真）。
+    assertCompleteAttachments(request.messages)
     const reentrantDispatch = this.requestInvariant.hasObserved(request)
     const messages = this.mapWireMessages(request.messages, {
+      toolsPresent: !!request.tools?.length,
       suppressStickyPreserve: reentrantDispatch,
     })
 
@@ -677,15 +711,15 @@ export class OpenAIClient implements StreamClient {
     // 而 2026-07-06 的原地双追加事故正是发生在它们的形状上。
     this.requestInvariant.observe(request, msgArray, body.tools as unknown[] | undefined)
 
-    if (request.prefixProbe) this.recordWireDivergence(msgArray, body.tools as unknown[] | undefined)
 
-    await this.sendStream(body, callbacks, signal, request.messages)
+    await this.sendStream(body, callbacks, signal, request.messages, request.contextBudget, request.prefixProbe)
   }
 
   /** Compare this request's final wire bytes with the previous main-turn
    *  request's; record the first diverged message. Pure appends record nothing.
    *  tools 数组单独成维——它不进 messages，消息级对比对其隐形。 */
   private recordWireDivergence(messages: Array<Record<string, unknown>>, tools?: unknown[]): void {
+    this.lastWireDivergence = null
     const sigs = messages.map(m => {
       const s = JSON.stringify(m)
       return { sig: wireHash(s), len: s.length, role: String(m.role ?? '?') }
@@ -749,11 +783,15 @@ export class OpenAIClient implements StreamClient {
      * 思考内容回不来。缺省 = 该调用方没提供，自愈分支直接跳过（不猜）。
      */
     sourceMessages?: OaiMessage[],
+    preparedBudget?: ContextBudgetSnapshot,
+    prefixProbe = false,
   ): Promise<void> {
     // reasoningRef survives retry attempts within this sendStream call.
     // When a mid-stream failure occurs (e.g. idle timeout, connection reset),
     // the accumulated reasoning_content is saved here and echoed back to the
     // model on the next retry so it doesn't have to redo all the thinking.
+    const requestId = preparedBudget?.requestId ?? crypto.randomUUID()
+    let attempt = 0
     const reasoningRef = { content: '' }
     const isThinking = this.config.thinking === 'enabled'
 
@@ -791,6 +829,13 @@ export class OpenAIClient implements StreamClient {
     })
 
     await withStructuredRetry(async () => {
+      // Failover replays the same request object (same preparedBudget.requestId)
+      // through another client instance; each client's attempt counter restarts
+      // at 1, so `requestId:1` collided across primary/backup and
+      // SessionContext's dedupe swallowed the fallback's real usage. Append a
+      // fresh UUID per actual send attempt: unique across clients and retries,
+      // while keeping the ordinal for diagnostics.
+      const identity: Omit<NonNullable<Usage['observation']>, 'status' | 'fields'> = { requestId, attemptId: `${requestId}:${++attempt}:${crypto.randomUUID()}` }
       // Reset instance state for each attempt
       this.toolCallBuffer.clear()
       this.toolCallHintFired.clear()
@@ -820,7 +865,7 @@ export class OpenAIClient implements StreamClient {
       // 重建（body.messages 已经是剥离后的历史，剥掉的信息回不来）。与剥图同理，
       // 只改本次 attempt 的 wire 副本，不动 request.messages / body。
       if (preserveReasoningRequested && !preserveReasoningApplied && sourceMessages) {
-        wireMessages = this.mapWireMessages(sourceMessages, { preserveReasoning: true })
+        wireMessages = this.mapWireMessages(sourceMessages, { preserveReasoning: true, toolsPresent: Array.isArray(body.tools) && body.tools.length > 0 })
         preserveReasoningApplied = true
         // wire 形态被改了（历史里多出 reasoning_content，前缀字节随之变化）——
         // 静默改形态是本仓最贵的 bug 形状，必须让调用方有机会说出来。
@@ -873,23 +918,59 @@ export class OpenAIClient implements StreamClient {
       // 也由 parseStreamFromReader 在任何退出路径（idle/硬顶超时、错误、正常结束）
       // 于 finally 中 abort —— 确保 keep-alive 下仅 reader.cancel() 可能拆不掉的 TCP
       // 连接被 fetch 侧 abort 真正拆除（mid-body abort 同时拆 fetch）。
-      const lifecycle = new AbortController()
-      if (signal) {
-        if (signal.aborted) lifecycle.abort()
-        else signal.addEventListener('abort', () => lifecycle.abort(), { once: true })
-      }
       // 请求体体积护栏（可选）：provider 网关超限时会**按字节截断 body**，切进一个
       // `\uXXXX` 转义就报 "unexpected end of hex escape" HTTP 400——用户只看到一句
       // 英文 serde 报错，会话从此发不出去。护栏只截 wire 副本（入参不动）、且确定性
       // （同输入同字节，降级后前缀仍稳定，不会每轮碎缓存）。
       // 未配置 maxBodyBytes 时不启用（不量体、零额外成本）；上游报错文案会引导配置。
-      const guard = enforceRequestBodyLimit(effectiveBody, { limitBytes: this.config.maxBodyBytes })
+      const policy = deepSeekBudgetPolicy(this.config.baseUrl, String(effectiveBody.model), this.config.contextWindow)
+      let wireBudget: ContextBudgetSnapshot | undefined
+      if (policy) {
+        const budget = buildContextBudget({
+          model: String(effectiveBody.model), messages: effectiveBody.messages as OaiMessage[],
+          tools: effectiveBody.tools as OaiChatRequest['tools'],
+          max_tokens: Number(effectiveBody.max_tokens ?? effectiveBody.max_completion_tokens ?? this.config.maxTokens),
+        }, policy, preparedBudget ?? { requestId: crypto.randomUUID(), revision: 0 })
+        wireBudget = budget
+        callbacks.onContextBudget?.(budget)
+        const imageError = deepSeekImageLimitError(effectiveBody.messages as OaiMessage[])
+        if (imageError) { callbacks.onContextBudget?.({ ...budget, state: 'blocked' }); throw imageError }
+        assertContextBudget(budget)
+      }
+      let guard: ReturnType<typeof enforceRequestBodyLimit>
+      try { guard = enforceRequestBodyLimit(effectiveBody, {
+        limitBytes: policy ? Math.min(this.config.maxBodyBytes ?? DEEPSEEK_BODY_LIMIT, DEEPSEEK_BODY_LIMIT) : this.config.maxBodyBytes,
+        preserveContent: !!policy,
+      }) } catch (error) {
+        if (wireBudget) callbacks.onContextBudget?.({ ...wireBudget, state: 'blocked', bodyBytes: (error as { bytes?: number }).bytes })
+        throw error
+      }
+      if (wireBudget) callbacks.onContextBudget?.({ ...wireBudget, bodyBytes: guard.bytes })
       // 降级/逼近上限必须可见（同 issue #94 的剥图教训：wire 层降级静默 = 用户读成
       // 「模型变笨了」）。节流规则（降级集合变化才报一次、逼近上限每会话一次）在
       // notifyBodyGuard 里与 anthropic 侧共用一份。
       notifyBodyGuard(guard, this.bodyGuardNotify, callbacks.onBodyGuard)
+      const lifecycle = new AbortController()
+      if (signal) {
+        if (signal.aborted) lifecycle.abort()
+        else signal.addEventListener('abort', () => lifecycle.abort(), { once: true })
+      }
       // 客户端限速（未配置 rateLimit 时零开销）：同 provider 的所有 client 实例共享一只桶。
       await acquireRateLimitSlot(this.config.providerName ?? this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
+      if (prefixProbe) {
+        const messages = guard.body.messages as Array<Record<string, unknown>>
+        this.recordWireDivergence(messages, guard.body.tools as unknown[] | undefined)
+        identity.prefix = {
+          system: wireHash(JSON.stringify(messages.filter(m => m.role === 'system'))),
+          tools: wireHash(stableStringify(guard.body.tools ?? [])),
+          history: wireHash(JSON.stringify(messages.filter(m => m.role !== 'system'))),
+          chars: JSON.stringify(messages).length, messages: messages.length,
+          changed: this.lastWireDivergence !== null, firstChange: this.lastWireDivergence?.idx,
+        }
+      }
+      let parserStarted = false
+      const sentAt = Date.now()
+      try {
       const response = await fetchWithTimeout(`${normalizeBaseUrl(this.config.baseUrl)}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -901,7 +982,7 @@ export class OpenAIClient implements StreamClient {
             ? { [this.config.sessionHeader ?? 'X-Request-Session']: this.config.sessionId }
             : {}),
         },
-        body: JSON.stringify(guard.body),
+        body: guard.serializedBody ?? JSON.stringify(guard.body),
         signal: lifecycle.signal,
       }, fetchTimeout, this.proxyDispatcher)
 
@@ -920,6 +1001,10 @@ export class OpenAIClient implements StreamClient {
           },
         )
         // Attach parsed retry-after for the error classifier to use
+        if (policy && response.status === 413) {
+          err.name = 'RequestBodyTooLargeError'
+          err.message = '服务拒收请求体（413）。原历史和图片已保留，请减少附件或整理上下文后重试。'
+        } else if (policy && classifyApiError(err).category === 'image_strip') err.name = 'ImageInputRejectedError'
         const retryAfter = response.headers.get('retry-after')
         if (retryAfter) {
           const retryAfterMs = parseRetryAfterMs(retryAfter)
@@ -948,7 +1033,17 @@ export class OpenAIClient implements StreamClient {
       const reader = response.body?.getReader()
       if (!reader) throw new Error('Response body is not readable')
 
-      await this.parseStreamFromReader(reader, callbacks, signal, reasoningRef, lifecycle, firstByteMs)
+      parserStarted = true
+      await this.parseStreamFromReader(reader, callbacks, signal, reasoningRef, lifecycle, firstByteMs, identity)
+      } catch (error) {
+        if (!parserStarted) callbacks.onStreamAttemptAborted?.({
+          ...identity, provider: this.config.providerName ?? 'openai', receivedChars: 0,
+          elapsedMs: Date.now() - sentAt, errorName: (error as Error).name, errorMessage: (error as Error).message,
+          usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+            observation: { ...identity, status: 'aborted', fields: {} } },
+        })
+        throw error
+      } finally { lifecycle.abort() }
     }, signal, {
       budget: this.config.retryBudget?.(),
       maxTotalDurationMs: this.config.retry?.maxTotalDurationMs
@@ -1024,7 +1119,17 @@ export class OpenAIClient implements StreamClient {
      * callers may omit it to keep the legacy derived behavior.
      */
     firstByteTimeoutMs?: number,
+    identity: Omit<NonNullable<Usage['observation']>, 'status' | 'fields'> = { requestId: crypto.randomUUID(), attemptId: crypto.randomUUID() },
   ): Promise<void> {
+    const settlement = new UsageSettlement()
+    const settledUsage = (status: 'complete' | 'aborted') => {
+      const usage = settlement.finish(identity, status)
+      if (!usage) return undefined
+      const calibrated = this.calibrateUsage({ input_tokens: usage.input_tokens ?? 0, output_tokens: usage.output_tokens ?? 0,
+        cache_read_input_tokens: usage.cache_read_input_tokens ?? 0, cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+        reasoning_tokens: usage.reasoning_tokens })
+      return { ...calibrated, observation: usage.observation }
+    }
     const decoder = new TextDecoder()
     let buffer = ''
     let streamTimedOut = false
@@ -1049,7 +1154,7 @@ export class OpenAIClient implements StreamClient {
       try { parsed = JSON.parse(payload) } catch { return }
       if (!parsed || typeof parsed !== 'object') return
       const delta = parsed?.choices?.[0]?.delta
-      if (parsed.choices?.[0] && !delta) return
+      if (parsed.choices?.[0] && !delta && !parsed.choices[0].finish_reason && !parsed.usage) return
       // Completed calls leave toolCallBuffer when flushed. Progress remains
       // monotonic for this attempt, even if reasoning arrives after finish_reason.
       if (delta?.tool_calls?.length) toolProgressReceived = true
@@ -1064,7 +1169,9 @@ export class OpenAIClient implements StreamClient {
           repetitionGuard?.push(delta.reasoning_content)
         }
       }
-      this.processDelta(parsed, callbacks)
+      settlement.observe(parsed.usage, parsed.choices?.[0]?.finish_reason)
+      // processDelta remains a chunk decoder; only the attempt owner settles.
+      this.processDelta(parsed, { ...callbacks, onStopReason: () => {} })
       if (delta?.content) textReceived = true
     }
 
@@ -1149,6 +1256,7 @@ export class OpenAIClient implements StreamClient {
     try {
       resetIdleTimer()
       let streamDone = false
+      let doneMarkerReceived = false
       // 硬顶 abort 可能发生在 reader.read() 阻塞期间——cancel() 让 read() 以
       // done=true 返回，若不在此显式抛出会变成"静默正常结束"，严格时限形同虚设。
       const throwIfHardCapAborted = (): void => {
@@ -1168,6 +1276,11 @@ export class OpenAIClient implements StreamClient {
         throwIfHardCapAborted()
 
         const { done, value } = await reader.read()
+        // Check user cancellation BEFORE trusting done=true: aborting the signal
+        // calls reader.cancel(), so the blocked read resolves with done=true.
+        // Without this re-check the attempt fell through to the success path and
+        // emitted `complete` despite the user pressing abort.
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
         // Check timeout AFTER read — reader.cancel() from idle timer causes
         // read() to return done=true, but we must throw, not silently break.
         if (streamTimedOut) {
@@ -1197,7 +1310,7 @@ export class OpenAIClient implements StreamClient {
           if (!trimmed || !trimmed.startsWith('data:')) continue
 
           const payload = trimmed.slice(5).trimStart()
-          if (payload === '[DONE]') { streamDone = true; break }
+          if (payload === '[DONE]') { doneMarkerReceived = true; streamDone = true; break }
           sawDataEvent = true
 
           if (process.env.RIVET_DEBUG_RAW_SSE) this.dumpRawSse(payload)
@@ -1215,8 +1328,20 @@ export class OpenAIClient implements StreamClient {
       const trimmed = buffer.trim()
       if (trimmed.startsWith('data:')) {
         const payload = trimmed.slice(5).trimStart()
-        if (payload !== '[DONE]') processPayload(payload)
+        if (payload === '[DONE]') doneMarkerReceived = true
+        else processPayload(payload)
       }
+
+      // Re-check after the stream loop: user abort may have resolved the final
+      // read/done path, and hard-cap abort can land between reads as well.
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      throwIfHardCapAborted()
+      // A missing terminal marker means the socket/stream ended mid-flight
+      // (proxy idle close, connection reset, provider bug). Settling this as
+      // `complete` loses the abort breadcrumb and lets a partial turn pass as a
+      // finished answer. `error-classifier` maps it to stream_parse so retry and
+      // FallbackStreamClient provider switching both apply.
+      if (!doneMarkerReceived) throw new IncompleteStreamError()
 
       this.flushToolCalls(callbacks, { final: true })
       // 网#1: DeepSeek tool-JSON-in-content fallback
@@ -1256,17 +1381,18 @@ export class OpenAIClient implements StreamClient {
       this._textAccum = ''
       this.contentStarted = false
 
-      // If no usage chunk arrived, emit stop reason now
-      if (this.pendingStopReason) {
-        callbacks.onStopReason?.(mapFinishReason(this.pendingStopReason), {})
-        this.pendingStopReason = null
+      const usage = settledUsage('complete')
+      if (usage && (settlement.reason || Object.keys(usage.observation!.fields).length)) {
+        callbacks.onStopReason?.(mapFinishReason(settlement.reason ?? 'stop'), usage)
       }
+      this.pendingStopReason = null
     } catch (err) {
       // Observability: surface how much streamed output this attempt discards.
       // Release the unfinished response even for direct parser callers without
       // a fetch lifecycle controller (including repetition/consumer failures).
       void reader.cancel().catch(() => {})
       callbacks.onStreamAttemptAborted?.({
+        ...identity, usage: settledUsage('aborted'),
         provider: this.config.providerName ?? 'openai',
         receivedChars: reasoningAccum.length + this._textAccum.length,
         elapsedMs: Date.now() - streamStartedAt,
@@ -1285,12 +1411,8 @@ export class OpenAIClient implements StreamClient {
       // 响应上 abort 为无操作，故正常结束路径安全。
       lifecycle?.abort()
 
-      // Promote reasoning to text even on stream error — prevents GLM "stuck" when
-      // stream breaks after receiving reasoning_content but before normal completion.
-      // Only for GLM — see main promotion block above for rationale.
-      if (!textReceived && reasoningAccum && !promotionFired && this.config.providerName === 'glm') {
-        callbacks.onTextDelta?.(reasoningAccum)
-      }
+      // Failed attempts are sealed by onStreamAttemptAborted. Never emit more
+      // content here: it would leak into the next retry's execution/history.
     }
   }
 

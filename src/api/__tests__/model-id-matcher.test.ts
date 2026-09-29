@@ -16,11 +16,13 @@ describe('alias table seeding', () => {
 
   it('entries carry backfillable metadata', () => {
     // 样本取 deepseek 官方现存的 strong 卡——v4pro 于 2026-09-11 退役后，
-    // 该档由 deepseek-flash（v4.1 线）承接（tier 同样是 strong/1M/384K）。
+    // 该档由 deepseek-flash（v4.1 线）承接（tier 同样是 strong/1M）。
     const entry = findAliasEntryExact('deepseek-flash')
     assert.ok(entry)
     assert.equal(entry!.metadata.contextWindow, 1_000_000)
-    assert.equal(entry!.metadata.maxTokens, 384_000)
+    // 默认请求输出 256K（对齐官方 harness 的 DEFAULT_MAX_TOKENS）。官方能力上限
+    // 384K 由 request-budget 的 DEEPSEEK_MAX_OUTPUT 另行守着——两者不是同一个数。
+    assert.equal(entry!.metadata.maxTokens, 256_000)
     assert.equal(entry!.metadata.tier, 'strong')
   })
 

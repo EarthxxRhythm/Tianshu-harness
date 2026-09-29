@@ -1,8 +1,14 @@
 import type { Tool, ToolCallParams } from './types.js'
-import type { FileHistory } from '../agent/file-history.js'
+import type { FileHistory, RewindGuardInput } from '../agent/file-history.js'
 import { trackFileRestore } from '../agent/recovery-stack.js'
 
-export function createUndoTool(getFileHistory: () => FileHistory | undefined): Tool {
+export function createUndoTool(
+  getFileHistory: () => FileHistory | undefined,
+  /** Late-bound cross-session guard for the restore write path. FileHistory can
+   *  also carry one; this provider is for callers that must resolve cwd /
+   *  session id lazily (e.g. /cd moves the workspace after bootstrap). */
+  getRewindGuard?: () => RewindGuardInput | undefined,
+): Tool {
   return {
     definition: {
       name: 'undo',
@@ -50,9 +56,16 @@ export function createUndoTool(getFileHistory: () => FileHistory | undefined): T
       }
 
       try {
-        const restored = await history.rewind(latestId)
+        const restored = await history.rewind(latestId, getRewindGuard?.())
+        const skipped = restored.skipped
+        const skippedNote = skipped.length > 0
+          ? `\n⏭  跳过 ${skipped.length} 个被其他会话编辑中的文件（未改动）：\n${skipped.map(f => `  - ${f}`).join('\n')}`
+          : ''
         if (restored.length === 0) {
-          return { content: '没有需要恢复的文件。' }
+          return {
+            content: skipped.length > 0 ? `没有需要恢复的文件。${skippedNote}` : '没有需要恢复的文件。',
+            ...(skipped.length > 0 ? { isError: true } : {}),
+          }
         }
         // Recovery-journal tracking is a best-effort audit side-effect; a write
         // failure (e.g. an unwritable cwd) must not mask an already-successful
@@ -69,7 +82,7 @@ export function createUndoTool(getFileHistory: () => FileHistory | undefined): T
         const unownedNote = unownedRestored.length > 0
           ? `\n⚠️  ${unownedRestored.length} 个文件不属于本任务：${unownedRestored.join(', ')}`
           : ''
-        return { content: `已恢复 ${restored.length} 个文件：\n${restored.map(f => `  - ${f}`).join('\n')}${unownedNote}` }
+        return { content: `已恢复 ${restored.length} 个文件：\n${restored.map(f => `  - ${f}`).join('\n')}${unownedNote}${skippedNote}` }
       } catch (err) {
         return { content: `撤销失败：${err instanceof Error ? err.message : String(err)}`, isError: true }
       }

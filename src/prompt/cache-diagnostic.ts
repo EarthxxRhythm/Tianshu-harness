@@ -9,6 +9,9 @@ export type CacheMissReason =
   | 'normal_growth'
   | 'cache_eviction'
   | 'no_data'
+  | 'provider_unknown'
+  | 'history_changed'
+  | 'restore_rebuild'
 
 export interface CacheDiagnostic {
   reason: CacheMissReason
@@ -22,27 +25,30 @@ export function diagnoseCacheMiss(
   currentTurn: number,
   drift: DriftEvent | null,
   wasCompacted: boolean,
+  evidence?: { wireChanged?: boolean; restored?: boolean; usageKnown?: boolean },
 ): CacheDiagnostic | null {
   if (history.length === 0) return null
 
   const current = history[history.length - 1]!
 
-  // Provider reported no cache counters at all — nothing to diagnose
-  if (current.cacheRead + current.cacheCreation === 0) return null
+  if (evidence?.usageKnown === false) return { reason: 'no_data', message: 'Cache usage was not reported', severity: 'info', turnHitRate: 0 }
+  if (!evidence && current.cacheRead + current.cacheCreation === 0) return null
 
   // First turn — no cache to hit
   if (history.length === 1) {
     return {
       reason: 'first_turn',
-      message: 'First turn — building prefix cache',
+      message: 'First observed request; cache may already exist',
       severity: 'info',
       turnHitRate: 0,
     }
   }
 
-  const turnTotal = current.cacheRead + current.cacheCreation
+  const turnTotal = current.inputTokens
   const turnHitRate = turnTotal > 0 ? current.cacheRead / turnTotal : 1
 
+  if (evidence?.restored) return { reason: 'restore_rebuild', message: 'Frozen context rebuilt after restore', severity: 'warn', turnHitRate }
+  if (evidence?.wireChanged && !wasCompacted) return { reason: 'history_changed', message: 'Final outgoing prefix changed; inspect the first changed component', severity: 'warn', turnHitRate }
   // High hit rate — nothing to explain
   if (turnHitRate >= 0.8) return null
 
@@ -80,9 +86,9 @@ export function diagnoseCacheMiss(
   if (current.cacheRead < prev.cacheRead) {
     const lost = prev.cacheRead - current.cacheRead
     return {
-      reason: 'prefix_truncation',
-      message: `Prefix truncation: cacheRead dropped ${lost} tokens (${prev.cacheRead} → ${current.cacheRead}) — mid-history divergence, check prefixDiverged/wireDiverged breadcrumbs`,
-      severity: 'error',
+      reason: 'provider_unknown',
+      message: `Cache read dropped ${lost} tokens (${prev.cacheRead} → ${current.cacheRead}); cause unconfirmed without request evidence`,
+      severity: 'warn',
       turnHitRate,
     }
   }
@@ -90,8 +96,8 @@ export function diagnoseCacheMiss(
   // Low hit rate with no obvious cause — likely cache eviction from long context
   if (turnHitRate < 0.4) {
     return {
-      reason: 'cache_eviction',
-      message: `Low cache hit (${(turnHitRate * 100).toFixed(0)}%) — prefix may have been evicted from cache due to context length`,
+      reason: 'provider_unknown',
+      message: `Low cache hit (${(turnHitRate * 100).toFixed(0)}%) — provider/cache cause unconfirmed`,
       severity: 'warn',
       turnHitRate,
     }

@@ -80,6 +80,7 @@ export async function askSidePath(
       },
       onThinkingDelta: () => {},
       onContentBlock: () => {},
+      onStreamAttemptAborted: info => { if (info.usage) deps.recordUsage?.(info.usage, request.model) },
       onStopReason: (_reason, usage) => {
         if (usage && (usage.input_tokens ?? 0) > 0) {
           deps.recordUsage?.(usage, request.model)

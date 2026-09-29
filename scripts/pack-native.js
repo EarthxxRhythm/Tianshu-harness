@@ -254,11 +254,11 @@ function crossPackNative(targetArch, targetPlatform) {
     if (!existsSync(buildRel)) {
       throw new Error('prebuild-install 未产出 better_sqlite3.node（可能该架构/版本无预编译包）')
     }
-    copyFileSync(buildRel, TARGET)
+    copyFreshInode(buildRel, TARGET)
   } finally {
     // 还原宿主架构二进制，绝不把跨架构产物留在 node_modules。
     if (backup) {
-      copyFileSync(backup, buildRel)
+      copyFreshInode(backup, buildRel)
       rmSync(backup, { force: true })
     }
   }
@@ -284,11 +284,20 @@ function crossPackNative(targetArch, targetPlatform) {
 // dist/native/，随 desktop bundle 一起被 codesign-nested.js 签名。缺失不报错
 // （旧行为 fail-open：resolveAxObserverBinary 找不到就回退 JXA 轮询）。
 const AX_OBSERVER_SOURCE = join(repoRoot, 'native', 'ax-observer')
+
+/** 拷贝可加载二进制前先删目标：copyFileSync 原地覆盖保留 inode，而 macOS AMFI
+ *  的代码签名缓存按 inode 记忆——内容换血后旧缓存不失效，mmap/加载即 SIGKILL
+ *  （2026-09-28 跨打实踩：win32 的 better_sqlite3.node 覆盖写进宿主 arm64
+ *  旧 inode，makensis mmap 打包时被杀；fetch-node-runtime 的 del+copy 同源）。 */
+function copyFreshInode(src, dest) {
+  rmSync(dest, { force: true })
+  copyFileSync(src, dest)
+}
 function packAxObserver() {
   if (!existsSync(AX_OBSERVER_SOURCE)) return
   mkdirSync(TARGET_DIR, { recursive: true })
   const target = join(TARGET_DIR, 'ax-observer')
-  copyFileSync(AX_OBSERVER_SOURCE, target)
+  copyFreshInode(AX_OBSERVER_SOURCE, target)
   const sizeKb = Math.round(statSync(target).size / 1024)
   console.log(`✅ Packed ax-observer (${sizeKb}KB) → ${target}`)
 }
@@ -304,7 +313,7 @@ mkdirSync(TARGET_DIR, { recursive: true })
 const TARGET_ARCH = resolveTargetArch()
 if (TARGET_ARCH === HOST_ARCH) {
   // 同架构：直接拷宿主 node_modules 的二进制，走 require 探测式 ABI 断言。
-  copyFileSync(SOURCE, TARGET)
+  copyFreshInode(SOURCE, TARGET)
   const sizeKb = Math.round(statSync(TARGET).size / 1024)
   console.log('✅ Packed better_sqlite3.node (%dKB) → %s', sizeKb, TARGET)
   assertAbi()

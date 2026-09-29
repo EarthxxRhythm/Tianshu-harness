@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { setImmediate as yieldToLoop } from 'node:timers/promises'
 import { existsSync, mkdirSync, readFileSync, unlinkSync, rmSync, readdirSync, statSync } from 'fs'
-import { writeFileAtomicSync, writeFileAtomicAsync } from '../fs-atomic.js'
+import { writeFileAtomicSync, writeFileAtomicAsync, writeFileAtomicDurableAsync } from '../fs-atomic.js'
 import { isAbsolute, join, relative, resolve } from 'path'
 import { sessionsDir } from '../config/paths.js'
 import type { ContentBlock, Message } from '../api/types.js'
@@ -108,6 +108,8 @@ export function serializeSessionMessage(message: Message, maxChars = MAX_SESSION
 
 export function serializeOaiSessionMessage(message: OaiMessage, maxChars = MAX_SESSION_MESSAGE_JSON_CHARS): string {
   const normalized = normalizeOaiMessage(message)
+  // Attachments are protocol data. Truncating a URL/base64 value corrupts it.
+  if (normalized.role === 'user' && Array.isArray(normalized.content)) return JSON.stringify(normalized)
   return serializeSessionJsonValue(normalized, maxChars, () => ({
     role: normalized.role,
     content: truncateString(JSON.stringify(normalized), maxChars),
@@ -130,7 +132,9 @@ function isOaiMessage(value: unknown): value is OaiMessage {
   if (!value || typeof value !== 'object') return false
   const msg = value as Record<string, unknown>
   if (msg.role === 'system') return typeof msg.content === 'string'
-  if (msg.role === 'user') return typeof msg.content === 'string'
+  if (msg.role === 'user') return typeof msg.content === 'string' || (Array.isArray(msg.content) && msg.content.every(part =>
+    part && ((part.type === 'text' && typeof part.text === 'string')
+      || (part.type === 'image_url' && typeof part.image_url?.url === 'string'))))
   if (msg.role === 'assistant') return typeof msg.content === 'string' || msg.content === null
   if (msg.role === 'tool') return typeof msg.tool_call_id === 'string' && typeof msg.content === 'string'
   return false
@@ -165,6 +169,18 @@ export function readHistoricalTranscript(filePath: string): Array<{ role: string
 }
 
 export class SessionPersist {
+  private frozenWrites: Promise<void> = Promise.resolve()
+  private frozenSaveError?: string
+
+  queueFrozenSnapshot(data: FrozenSnapshotData): void {
+    this.frozenWrites = this.frozenWrites.then(async () => {
+      await writeFileAtomicAsync(this.frozenPath, JSON.stringify(data))
+      this.frozenSaveError = undefined
+    }).catch(() => { this.frozenSaveError = 'snapshot_save_failed' })
+  }
+
+  async drainFrozenSnapshots(): Promise<void> { await this.frozenWrites }
+  getFrozenSnapshotError(): string | undefined { return this.frozenSaveError }
   private filePath: string
   private metadataPath: string
   private frozenPath: string
@@ -541,11 +557,11 @@ export class SessionPersist {
   }
 
   /** Async atomic compaction — avoids blocking the agent loop on full rewrites (S13). */
-  async compactOaiAsync(messages: OaiMessage[]): Promise<void> {
+  async compactOaiAsync(messages: OaiMessage[], durable = false): Promise<void> {
     await this.flushSessionBuffer()
     const audit = this.collectAuditLines()
     const content = [...audit, ...messages.map(m => appendChecksum(serializeOaiSessionMessage(m)))].join('\n') + '\n'
-    await writeFileAtomicAsync(this.filePath, encodeBatch(content))
+    await (durable ? writeFileAtomicDurableAsync : writeFileAtomicAsync)(this.filePath, encodeBatch(content))
     this.transcriptWatermark = messages.length
   }
 
@@ -667,8 +683,11 @@ export class SessionPersist {
   readFrozenSnapshot(): FrozenSnapshotData | undefined {
     if (!existsSync(this.frozenPath)) return undefined
     try {
-      return parseFrozenSnapshotData(JSON.parse(readFileSync(this.frozenPath, 'utf-8')))
+      const data = parseFrozenSnapshotData(JSON.parse(readFileSync(this.frozenPath, 'utf-8')))
+      if (!data) this.frozenSaveError = 'snapshot_corrupt'
+      return data
     } catch {
+      this.frozenSaveError = 'snapshot_corrupt'
       return undefined
     }
   }

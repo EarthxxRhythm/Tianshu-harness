@@ -46,6 +46,7 @@ import {
   shouldReconcileDisk,
 } from './context/write-evidence-probe.js'
 import { FileHistory } from './agent/file-history.js'
+import { makeOwnershipGuard } from './agent/checkpoint.js'
 import { PromptEngine } from './prompt/engine.js'
 import { subagentPromptBlocks } from './prompt/block-policy.js'
 import { applyDescriptionMode } from './tools/description-compact.js'
@@ -841,9 +842,7 @@ export function createInteractiveToolRegistry(
  * 顶多下次 resume 退化为全量重建）。startup / /resume 切换 / /cd 三处统一挂。
  */
 function wireFrozenSnapshotPersist(persist: SessionPersist, engine: import('./prompt/engine.js').PromptEngine): void {
-  engine.setOnFrozenSnapshotCommit(() => {
-    try { persist.writeFrozenSnapshot(engine.exportFrozenSnapshot()) } catch { /* best-effort */ }
-  })
+  engine.setOnFrozenSnapshotChanged(() => persist.queueFrozenSnapshot(engine.exportFrozenSnapshot()))
 }
 
 /** 已报过的「配置的模型名不存在」告警——本函数每会话 + 每次 switchModel 重建都跑，
@@ -961,7 +960,7 @@ export function createAgentRuntime(deps: {
     toolDefinitions: toolRegistry.getDefinitions(),
     sessionMemoryBlock: persist.buildMemoryBlock(),
     auth,
-    inheritFrozenFrom: deps.inheritFrozenFrom,
+    inheritFrozenFrom: deps.inheritFrozenFrom ?? persist.readFrozenSnapshot(),
     onStatusLine: deps.onStatusLine,
     allowedTools: deps.allowedTools,
     wireContext,
@@ -1075,6 +1074,7 @@ export function createAgentRuntime(deps: {
   const agent = new AgentLoop(
     {
       ...agentCfg,
+      sessionPersist: persist,
       toolRegistry,
       zen: zenConfig,
       // P2: CVM 管线装配配置——磁盘 Config.hooks 填入 AgentLoop 选项
@@ -1131,6 +1131,7 @@ export function createAgentRuntime(deps: {
     deps.session,
     cwd,
   )
+  wireFrozenSnapshotPersist(persist, agent.config.promptEngine)
   agentForSignals = agent
 
   refs.coordinator = new DelegationCoordinator({
@@ -1371,7 +1372,8 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
         try { ctx.persist.updateMetadata({ cleanExit: true }) } catch { /* best-effort */ }
         // resume 缓存继承的 shutdown flush：覆盖 collapse watermark 等不经
         // commit 钩子的漂移（边界写由 wireFrozenSnapshotPersist 已覆盖）。
-        try { ctx.persist.writeFrozenSnapshot(ctx.agent.config.promptEngine.exportFrozenSnapshot()) } catch { /* best-effort */ }
+        ctx.persist.queueFrozenSnapshot(ctx.agent.config.promptEngine.exportFrozenSnapshot())
+        await ctx.persist.drainFrozenSnapshots()
         ctx.persist.compactOai(ctx.session.getMessages())
         if (ctx.fileHistory) {
           persistFileHistory(
@@ -1909,6 +1911,13 @@ export async function switchAgentCwd(ctx: BootstrapContext, target: string): Pro
   // 旧目录搬不空更让回程 /cd rename ENOTEMPTY 确定性砖化。会话文件已整体迁到新 slug
   // 目录（第 4 步），容器按 newPersist 重建即无缝接管。
   const rebuiltStores = rebuildStoresAfterCwdMove(ctx.fileHistory, newPersist)
+  // cwd moved: rebind the claim guard to the new workspace, otherwise undo/
+  // rewind would query the old project's claim keys and silently miss a peer.
+  rebuiltStores.fileHistory.setClaimGuard(
+    ctx.refs.sessionRegistry
+      ? makeOwnershipGuard(ctx.refs.sessionRegistry, ctx.sessionId, newCwd)
+      : undefined,
+  )
 
   const { agent } = createAgentRuntime({
     provider: ctx.provider,
@@ -1934,6 +1943,7 @@ export async function switchAgentCwd(ctx: BootstrapContext, target: string): Pro
   ctx.agent = agent
   ctx.persist = newPersist
   ctx.fileHistory = rebuiltStores.fileHistory
+  ctx.refs.fileHistory = rebuiltStores.fileHistory
   ctx.claimStore = rebuiltStores.claimStore
   ctx.cwd = newCwd
   ctx.refs.promptEngine = agent.config.promptEngine
@@ -2152,7 +2162,15 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
   for (const err of skillLoad.errors) {
     console.warn(`[skills] ${err}`)
   }
-  const fileHistory = new FileHistory(persist.getBackupDir(), sessionId)
+  // Undo/rewind writes obey the same exclusive-claim discipline as the write
+  // tools. The instance carries the guard so every consumer (undo tool, TUI
+  // /undo, rewind overlay) is covered, not just the server's precise-rewind
+  // entry point; per-call guards still win where callers pass one.
+  const fileHistory = new FileHistory(
+    persist.getBackupDir(),
+    sessionId,
+    sessionRegistry ? makeOwnershipGuard(sessionRegistry, sessionId, cwd) : undefined,
+  )
   const session = new SessionContext()
 
   // Load prior messages. When the session id was explicitly resumed

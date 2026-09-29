@@ -54,16 +54,18 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
         prefixCompletion: true,
       },
       thinking: 'enabled',
-      // 官方 API(api.deepseek.com/zh-cn/quick_start/pricing):
-      // 上下文 100 万,单次输出上限 38.4 万。2026-07-01 误改为 6.4 万(V3 旧值),
-      // 导致 reasoning_effort=max 时推理未完即被 length 截断、loop 收到空响应判死停止。
-      maxTokens: 384_000,
+      // 官方 API(api.deepseek.com/zh-cn/quick_start/pricing):上下文 100 万,单次输出上限 38.4 万。
+      // 2026-07-01 误改为 6.4 万(V3 旧值),导致 reasoning_effort=max 时推理未完即被 length
+      // 截断、loop 收到空响应判死停止——这是硬下限教训,不是理论风险。
+      // 现取 256K:与官方 harness 的 DEFAULT_MAX_TOKENS 同一语义(per-request output cap)。
+      // 失效方向:若 reasoning max 档再出现 length 截断空响应,调高本值——不要改预算公式。
+      maxTokens: 256_000,
       models: [
         {
           id: 'deepseek-v4-flash',
           description: '快速档：能力对标旗舰，成本更低',
           contextWindow: 1_000_000,
-          maxTokens: 384_000,
+          maxTokens: 256_000,
           reasoningEffort: 'medium',
           tier: 'cheap',
           pricing: { input: 1, output: 2, cacheRead: 0.02, cacheWrite: 1 },
@@ -74,7 +76,7 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
           id: 'deepseek-v4-pro',
           description: '旗舰推理档，1M 上下文',
           contextWindow: 1_000_000,
-          maxTokens: 384_000,
+          maxTokens: 256_000,
           // Cost default: high (not max). Routine turns can step down further via
           // effort routing; users who need max can set it in config / Settings.
           reasoningEffort: 'high',
@@ -90,7 +92,7 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
           id: 'deepseek-flash',
           description: '旗舰档：V4.1 线，1M 上下文 + 原生多模态（图像输入）',
           contextWindow: 1_000_000,
-          maxTokens: 384_000,
+          maxTokens: 256_000,
           reasoningEffort: 'medium',
           tier: 'strong',
           supportsVision: true,

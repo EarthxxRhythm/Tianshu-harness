@@ -82,6 +82,7 @@ export type AskModeState = 'off' | 'asking'
 //    记录侧只在下拉/push 时现算，长 run 中途环形图百分比最多落后 30s；带上
 //    它之后桌面端百分比与缓存计数同频。旧客户端忽略该字段。
 export type SessionEventType =
+  | 'context_budget'
   | 'user'
   | 'text_delta'
   | 'thinking_delta'
@@ -222,7 +223,28 @@ export type ZenPhaseMirror = {
   zenTurns: number
 }
 
+export interface ContextBudgetSnapshot {
+  requestId: string
+  revision: number
+  sampledAt: number
+  model: string
+  windowTokens: number
+  inputBudget: number
+  inputTokens: number
+  outputReserve: number
+  safetyMargin: number
+  imageTokens: number
+  reasoningTokens: number
+  toolTokens: number
+  bodyBytes?: number
+  measuredInputTokens?: number
+  generatedTokens?: number
+  source: 'estimate' | 'measured'
+  state: 'ready' | 'warning' | 'compacting' | 'blocked'
+}
+
 export interface SessionRecord {
+  contextBudget?: ContextBudgetSnapshot
   persistenceState?: 'saved' | 'failed'
   durableWatermark?: number
   runId?: string

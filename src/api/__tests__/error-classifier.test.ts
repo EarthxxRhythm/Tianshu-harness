@@ -225,13 +225,15 @@ describe('classifyApiError', () => {
     assert.equal(result.maxRetries, 0)
   })
 
-  it('classifies RequestBodyTooLargeError as context_overflow (no retry — 确定性失败)', () => {
+  it('classifies RequestBodyTooLargeError as request_body_too_large (no retry — 确定性失败)', () => {
     // 护栏的超限判定是确定性的：重试逐字节重现同一个超限体。走 unknown 兜底
     // 会白烧 2 轮 backoff 才把可行动文案还给用户（该文案原样透出，不含凭证）。
+    // 独立类别而非 context_overflow：超的是**传输字节**，不是上下文 token——
+    // 指引必须说「减少附件」而不是「压缩上下文」（后者对纯字节超限无效）。
     const err = new Error('请求体 4.6MB 超出传输上限 4.0MB……')
     err.name = 'RequestBodyTooLargeError'
     const result = classifyApiError(err)
-    assert.equal(result.category, 'context_overflow')
+    assert.equal(result.category, 'request_body_too_large')
     assert.equal(result.retryable, false)
     assert.equal(result.maxRetries, 0)
     assert.equal(result.userMessage, err.message)

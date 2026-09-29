@@ -9,7 +9,8 @@
 | [2026-08-05-desktop-scroll-stream-follow.md](2026-08-05-desktop-scroll-stream-follow.md) | 桌面端滚动 S1 修复已落地（`4c952c3a5`）；剩 S2 两候选假设的实机取证 | 代码已修，待 Windows/macOS 实机验收 |
 | 2026-08-15-desktop-scroll-timeline-collapse-tug.md | 桌面滚动拉锯：A'/B + 对标三件 + 遗留①均已落地（遗留②症状路径 end-anchor 下已停用）；剩 Windows 真实 WebView2 两档复验 | 代码已修，待 Windows 实机验收 |
 | 2026-09-15-windows-git-bash-orphan-descendants.md | Windows+Git Bash 超时后后台孙进程逃过 taskkill /T（issue #144）；PR #159 已消除 3 秒空转（治标），泄漏本体待修 | 🔴 待修复（阻塞于 Windows 实机验证通道） |
-| [2026-09-23-windows-antivirus-interception.md](2026-09-23-windows-antivirus-interception.md) | Windows 杀毒软件拦截族：安装被拦（未签名放大器，`f245fd92e` 已接线 fail-closed + 验签闸门）/ 误杀 / 443 证书中间人（新 `tls_intercept` + `/doctor` 探测） | 🟡 工程侧已落地；证书采购与厂商白名单未办，未实机复验 |
+| 2026-09-23-windows-antivirus-interception.md | Windows 杀毒软件拦截族：安装被拦（未签名放大器，`f245fd92e` 已接线 fail-closed + 验签闸门）/ 误杀 / 443 证书中间人（新 `tls_intercept` + `/doctor` 探测） | 🟡 工程侧已落地；证书采购与厂商白名单未办，未实机复验 |
+| 2026-09-26-windows-kaspersky-sidecar-pdm.md | 卡巴斯基 PDM 把 sidecar 宿主形态（`node.exe` + `entry.js`）判成 `PDM:Trojan.Win32.Generic` 并隔离 → 界面正常但 agent 完全不可用；用户侧规避方案已实机验证 | 🟡 用户侧规避已验证（社区报告）；宿主形态与安装器 purge 语义待评估，未由维护者实机复现 |
 
 > 桌面滚动线（两条）的共同外部依赖：Windows/macOS 实机验收，见
 > [2026-08-12-windows-session-stability-refactor.md](2026-08-12-windows-session-stability-refactor.md) 的验收待办——**代码侧无剩余工作，别再按「未修」排期**。

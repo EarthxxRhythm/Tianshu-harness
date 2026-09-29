@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # linux-container-build.sh — **在 Linux 容器内执行**的构建链（宿主勿直接跑）。
 # 由 scripts/build-linux-container.sh 注入容器后调用；按 CI workflow 同款步骤
-# 出 AppImage（含 repack-appimage-pango，issue #80）。
+# 出 AppImage（含 postprocess-linux-appimage：图形栈全系统 + 完整性对账）。
 set -euo pipefail
 cd /work
 
@@ -35,7 +35,7 @@ npm run build
 cd desktop
 npm ci
 node scripts/fetch-node-runtime.js
-# tauri:build:appimage = tauri build --bundles appimage + repack-appimage-pango.sh
+# tauri:build:appimage = tauri build --bundles appimage + postprocess-linux-appimage.sh
 npm run tauri:build:appimage
 
 echo "=== AppImage 产物 ==="

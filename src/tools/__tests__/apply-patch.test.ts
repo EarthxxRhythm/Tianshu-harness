@@ -322,4 +322,45 @@ diff --git a/b.txt b/b.txt
     const checkout = git(repoDir, ['checkout', '--', 'a.txt'])
     assert.equal(checkout.status, 0, `git checkout -- a.txt must work after rollback: ${checkout.stderr}`)
   })
+
+  it('failure carries recovery guidance and patch_rejected errorKind', async () => {
+    writeFileSync(join(repoDir, 'file.txt'), 'already changed\n')
+    const result = await APPLY_PATCH_TOOL.execute({
+      input: { diff: validDiff },
+      toolUseId: 'toolu_guidance',
+      cwd: repoDir,
+    })
+    assert.equal(result.isError, true)
+    assert.equal(result.errorKind, 'patch_rejected', 'structural channel must classify git-apply rejections')
+    assert.match(result.content, /恢复建议/)
+    assert.match(result.content, /read_file/)
+    assert.match(result.content, /不要原样重发/)
+  })
+
+  it('untracked target file gets the not-in-index guidance (worker新建文件死局)', async () => {
+    writeFileSync(join(repoDir, 'newfile.txt'), 'hello\n')
+    const diff = 'diff --git a/newfile.txt b/newfile.txt\nindex 0000000..1111111 100644\n--- a/newfile.txt\n+++ b/newfile.txt\n@@ -1 +1 @@\n-hello\n+world\n'
+    const result = await APPLY_PATCH_TOOL.execute({
+      input: { diff },
+      toolUseId: 'toolu_untracked',
+      cwd: repoDir,
+    })
+    assert.equal(result.isError, true)
+    assert.equal(result.errorKind, 'patch_rejected')
+    assert.match(result.content, /未被 git 跟踪/)
+    assert.match(result.content, /edit_file/)
+  })
+
+  it('corrupt hunk counts get the format guidance', async () => {
+    const bad = 'diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n original\n+x\n'
+    const result = await APPLY_PATCH_TOOL.execute({
+      input: { diff: bad },
+      toolUseId: 'toolu_corrupt',
+      cwd: repoDir,
+    })
+    assert.equal(result.isError, true)
+    assert.equal(result.errorKind, 'patch_rejected')
+    assert.match(result.content, /格式损坏/)
+    assert.match(result.content, /计数/)
+  })
 })

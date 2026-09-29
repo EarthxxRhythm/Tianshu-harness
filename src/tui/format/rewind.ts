@@ -23,8 +23,10 @@ export type RewindMode = 'convo' | 'code' | 'both' | 'summarize-from' | 'summari
 
 export interface RewindFile {
   path: string
-  /** unreadable = 该文件的备份在编辑时读取失败，回溯会跳过它（不删也不还原）。 */
-  action: 'restore' | 'delete' | 'unreadable'
+  /** unreadable = 备份在编辑时读取失败；blocked = 另一会话持有 claim。
+   *  两者回溯都会跳过（不删也不还原）。 */
+  action: 'restore' | 'delete' | 'unreadable' | 'blocked'
+  blockedBy?: string
 }
 
 export interface RewindEntry {
@@ -175,6 +177,7 @@ function buildActionBody(body: string[], data: RewindData, selected: number, w: 
       shown.forEach(f => {
         const badge = f.action === 'delete' ? color('删除', theme.error)
           : f.action === 'unreadable' ? color('无法撤销（备份当时读取失败，将跳过）', theme.warning)
+          : f.action === 'blocked' ? color('被其他会话编辑中（将跳过）', theme.warning)
           : color('还原', theme.primary)
         body.push(`    ${badge}  ${color(oneLine(f.path, w - 10), theme.secondary)}`)
       })

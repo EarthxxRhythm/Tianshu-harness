@@ -55,6 +55,27 @@ describe('createUndoTool', () => {
     assert.equal(readFileSync(file, 'utf-8'), 'v1')
   })
 
+  it('skips a file claimed by another session and reports it', async () => {
+    const own = join(TMP, 'own.txt')
+    const peer = join(TMP, 'peer.txt')
+    writeFileSync(own, 'v1')
+    writeFileSync(peer, 'v1')
+    await history.trackEdit(own, 'msg_1')
+    await history.trackEdit(peer, 'msg_1')
+    writeFileSync(own, 'v2')
+    writeFileSync(peer, 'peer-v2')
+    history.setClaimGuard({ isOwnedByOther: (filePath: string) => filePath === peer })
+
+    const tool = createUndoTool(() => history)
+    const result = await tool.execute({ input: { confirm: true }, toolUseId: 't', cwd: TMP })
+
+    assert.equal(result.isError, undefined)
+    assert.ok(result.content.includes('跳过'))
+    assert.ok(result.content.includes('peer.txt'))
+    assert.equal(readFileSync(own, 'utf-8'), 'v1', 'unclaimed file restored')
+    assert.equal(readFileSync(peer, 'utf-8'), 'peer-v2', 'peer-claimed file untouched')
+  })
+
   it('has correct tool name', () => {
     const tool = createUndoTool(() => undefined!)
     assert.equal(tool.definition.name, 'undo')

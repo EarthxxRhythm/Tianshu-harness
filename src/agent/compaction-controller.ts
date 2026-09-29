@@ -499,6 +499,8 @@ export class CompactionController {
   }
 
   async maybeCompact(input: MaybeCompactInput): Promise<MaybeCompactResult> {
+    // Verified request budgets are enforced after final prompt assembly, with durable commits.
+    if (this.deps.promptEngine.getRequestBudgetPolicy?.()) return { failures: input.failures, compacted: false }
     // Ensure prefix overhead is always set before any early return.
     // Without this, getEstimatedTokens() omits the system prompt + tool
     // definition cost, making GlanceBar show ctx 0% and ◧ 0/1.0M.
@@ -1268,6 +1270,13 @@ export class CompactionController {
               this.deps.recordSummaryUsage?.(usage, request.model)
             }
           },
+          // Partial-compact shares the side-path ledger with the full compact
+          // path: an interrupted attempt may already carry provider usage and
+          // must not disappear from totals/cache-log just because no success
+          // onStopReason follows.
+          onStreamAttemptAborted: (info) => {
+            if (info.usage) this.deps.recordSummaryUsage?.(info.usage, request.model)
+          },
           onError: () => { errored = true },
         }, combinedSignal)
       } catch {
@@ -1394,6 +1403,9 @@ export class CompactionController {
           if (usage && (usage.input_tokens ?? 0) > 0) {
             this.deps.recordSummaryUsage?.(usage, request.model)
           }
+        },
+        onStreamAttemptAborted: (info) => {
+          if (info.usage) this.deps.recordSummaryUsage?.(info.usage, request.model)
         },
         onError: () => { errored = true },
       }, signal)

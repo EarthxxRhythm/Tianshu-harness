@@ -27,6 +27,7 @@ import {
 } from './slash-local.js'
 import { canAddImage, imageTooLarge, normalizeImageDataUrl } from './image-paste.js'
 import { filterSessions, sessionLabel, splitSessionLists } from './session-list.js'
+import { switchComposerDraft, type ComposerDraft } from './session-drafts.js'
 import { parseCheckpointTurns, parseDefaultDomain, parseDefaultModel, wireApproval } from './settings-form.js'
 
 type SidecarState = 'starting' | 'ready' | 'dead'
@@ -1832,6 +1833,23 @@ function Composer(props: {
   const histIdx = useRef<number | null>(null)
   const stashedDraft = useRef('')
   useEffect(() => { histIdx.current = null }, [props.sessionKey])
+  // 草稿镜像 ref（activeIdRef 同款 idiom）：切会话暂存时读最新值，不进依赖数组。
+  const draftRef = useRef({ text, images })
+  draftRef.current = { text, images }
+  // issue #296 — 草稿按会话隔离：text/images 属于会话。切会话时暂存旧会话、
+  // 恢复目标会话；全局单值会把 A 打好的内容带进 B 的输入框，在 B 发送即泄漏。
+  // 未附着会话的欢迎页草稿用 '' 作 key（切走再切回「新会话」不丢）。
+  const draftStash = useRef(new Map<string, ComposerDraft>())
+  const prevSessionKeyRef = useRef(props.sessionKey ?? '')
+  useEffect(() => {
+    const toKey = props.sessionKey ?? ''
+    const fromKey = prevSessionKeyRef.current
+    if (fromKey === toKey) return
+    prevSessionKeyRef.current = toKey
+    const next = switchComposerDraft(draftStash.current, fromKey, toKey, draftRef.current)
+    setText(next.text)
+    setImages(next.images)
+  }, [props.sessionKey])
   useEffect(() => {
     if (!props.restoreDraft) return
     histIdx.current = null

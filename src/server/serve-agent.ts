@@ -16,6 +16,7 @@ import { runGateCompletion } from '../agent/gate-completion.js'
 import { memoryBackfillEnabled, runMemoryBackfill } from '../memory/backfill.js'
 import { restoreGoalTracker } from '../agent/goal-persist.js'
 import { FileHistory } from '../agent/file-history.js'
+import { makeOwnershipGuard } from '../agent/checkpoint.js'
 import { loadProjectRules } from '../context/rules-loader.js'
 import { createDefaultToolRegistry } from '../tools/default-registry.js'
 import { pluginToolsSnapshot, partitionPluginTools } from './plugin-session-cache.js'
@@ -379,7 +380,14 @@ function buildSessionStores(
   // skillRegistry.list() returns empty and the desktop PlusMenu shows no skills.
   const skillLoad = loadProjectSkills(cwd, { importFromClaude: ctx.config.skills?.importFromClaude })
   recordSkillLoadErrors(sessionId, skillLoad.errors) // 此前丢弃；见 skill-load-errors.ts
-  const fileHistory = new FileHistory(persist.getBackupDir(), sessionId)
+  // Undo/rewind must follow the write tools' exclusive-claim discipline too;
+  // the instance carries the guard so per-session undo TUI/slash paths and the
+  // manager's precise rewind all skip peer-claimed files instead of clobbering.
+  const fileHistory = new FileHistory(
+    persist.getBackupDir(),
+    sessionId,
+    registry ? makeOwnershipGuard(registry, sessionId, cwd) : undefined,
+  )
   const session = new SessionContext()
   // Restore prior conversation from disk (sidecar restart recovery).
   // Matches TUI bootstrap.ts:1461 — loadOai returns [] for new sessions.
@@ -607,6 +615,7 @@ function assembleAgentLoop(
   shared?: SharedRuntime,
   allowedTools?: string[],
   reload?: () => ServeContext,
+  inheritFrozenFrom?: import('../prompt/engine.js').PromptEngine,
 ): AgentLoop {
   // Wave J: domainKnowledgeStore 优先从 sidecar SharedRuntime.domainStores
   // 按 cwd 取；fallback 是 per-call new（与 bootstrap 单 session 行为一致——
@@ -642,6 +651,7 @@ function assembleAgentLoop(
     // provider 健康累积；coordinator 冷层路由有正确依据。
     sharedProviderHealth: shared?.providerHealth,
     // I4: user hook results → desktop event stream via the session manager.
+    inheritFrozenFrom,
     emitHookResult: (results, meta) => shared?.sessions?.emitHookResult(sessionId, results, meta),
     // Per-session 工具白名单（蒸馏回放等自动化场景）。
     allowedTools,
@@ -856,7 +866,7 @@ export function buildManagedAgent(
     void oldAgent.cancelIdleCompaction()
     spec = next
     const liveApprovalMode = oldAgent.config.approvalMode
-    agent = assembleAgentLoop(ctx, cwd, sessionId, stores, spec, liveApprovalMode, registry, shared, allowedTools, reload)
+    agent = assembleAgentLoop(ctx, cwd, sessionId, stores, spec, liveApprovalMode, registry, shared, allowedTools, reload, oldAgent.config.promptEngine)
     if (oldCoordinator && oldCoordinator !== stores.refs.coordinator) {
       try { oldCoordinator.shutdown() } catch { /* best-effort: shutdown is fail-open */ }
     }
@@ -979,6 +989,8 @@ export function buildManagedAgent(
     getGoalTracker: () => agent.getGoalTracker(),
     setGoalTracker: (tracker) => agent.setGoalTracker(tracker),
     getContextWindow: () => spec.model.contextWindow,
+    getContextBudget: () => agent.getContextBudget(),
+    compactContext: () => agent.compactContext(),
     getReasoningEffort: () => agent.getReasoningEffort(),
     // 识图桥真实状态（供桌面端准确显示，而非只看 config 有没有 visionModel 键）。
     // 依赖当前会话模型，故取活 agent 的 config 而非静态 config。

@@ -86,6 +86,7 @@ export interface AgentConfig {
    *  ask is denied immediately with a model-facing instruction instead of stalling on a
    *  prompt no one can answer. Deny rules and the self-kill guard still win. */
   headless?: boolean
+  sessionPersist?: import('./session-persist.js').SessionPersist
   sessionId?: string
   /** Review-router re-entrancy depth. Worker contexts spawned by review routing use depth > 0. */
   reviewDepth?: number
@@ -348,6 +349,7 @@ export interface DomainResolvedPayload {
 }
 
 export interface AgentCallbacks {
+  onContextBudget?: (budget: import('../server/protocol.js').ContextBudgetSnapshot) => void
   /** Await durable execution intent before a tool may produce side effects. */
   beforeToolExecute?: (id: string, name: string, input: Record<string, unknown>) => Promise<void>
   onTextDelta: (text: string) => void

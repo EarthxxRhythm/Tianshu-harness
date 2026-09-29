@@ -941,21 +941,201 @@ test('外部新增的会话被增量装上，并恰好推一次 sessions_changed
   assert.deepEqual(changes, ['external'], '无新增不推')
 })
 
-test('外部扫描只增不覆盖：id 已在本进程内存时保持本进程状态', () => {
+// issue #274 修复后，「只增不覆盖」只管 adopt 新 id 这一半；**已知空闲会话**的
+// record 展示字段（status/title/updatedAt/lastSeq）要跟随磁盘——否则桌面端列表
+// 永远看不到手机端跑的状态。本进程 running 的会话仍不合并（并发写归本进程管）。
+test('已知空闲会话跟随外部 record 漂移，本进程 running 会话不合并', () => {
+  const p = new LazyMemoryPersistence([seeded('a'), seeded('b')])
+  const changes: string[] = []
+  const mgr = new RuntimeSessionManager({
+    createAgent: () => new NoopAgent(),
+    persistence: p,
+    externalScanMs: 0,
+    onSessionsChanged: (reason) => changes.push(reason),
+  })
+  // b 标记为本进程 running——外部对它的写不得合并
+  const internal = (mgr as unknown as { sessions: Map<string, { running: boolean }> }).sessions
+  internal.get('b')!.running = true
+
+  // 外部进程推进了两个会话
+  p.saveRecord({ ...seeded('a').record, status: 'running', updatedAt: 999, lastSeq: 7 })
+  p.saveRecord({ ...seeded('b').record, status: 'running', updatedAt: 999, lastSeq: 9 })
+
+  adoptNow(mgr)
+
+  const a = mgr.listAllSessions().find((s) => s.id === 'a')!
+  assert.equal(a.status, 'running', '空闲会话跟随磁盘状态')
+  assert.equal(a.updatedAt, 999)
+  assert.equal(a.lastSeq, 7)
+  const b = mgr.listAllSessions().find((s) => s.id === 'b')!
+  assert.equal(b.status, 'completed', '本进程 running 会话不被外部记录覆盖')
+  assert.equal(b.lastSeq, 0)
+  assert.deepEqual(changes, ['external'], 'record 漂移恰好推一次')
+
+  // 幂等：磁盘无新变化时不重复推
+  adoptNow(mgr)
+  assert.deepEqual(changes, ['external'])
+})
+
+// issue #274 的契约钉：adopt 只登记 record（events 为空是**懒加载约定**，与
+// rehydrate 一致），首次打开会话时由 ensureEvents 按需补读磁盘日志。这条契约
+// 此前没有测试覆盖——它正是「外部进程的会话在桌面端可见但内容为空」的争夺点：
+// 服务端在 since=0 时必须回放完整历史，否则断点在别处。
+test('adopt 进来的会话首次打开（since=0）回放磁盘上的完整历史', async () => {
   const p = new LazyMemoryPersistence([seeded('a')])
   const mgr = new RuntimeSessionManager({
     createAgent: () => new NoopAgent(),
     persistence: p,
     externalScanMs: 0,
   })
-  const before = mgr.listAllSessions().find((s) => s.id === 'a')!
 
-  // 磁盘上出现同 id、但状态不同的记录（外部进程动过它）
-  p.saveRecord({ ...seeded('a').record, status: 'running', updatedAt: 999 })
+  // 外部进程跑完了一轮对话：record 与 events 都落在共享 home 上
+  p.saveRecord({ ...seeded('c').record, lastSeq: 2, updatedAt: 500 })
+  p.appendEvent('c', ev(1, 'status', { status: 'running' }))
+  p.appendEvent('c', ev(2, 'text_delta', { text: 'hi' }))
 
   adoptNow(mgr)
+  assert.deepEqual(
+    mgr.listAllSessions().map((s) => s.id).sort(), ['a', 'c'],
+    'adopt 只登记元数据即可见',
+  )
+  assert.deepEqual(p.loadEventsCalls, [], 'adopt 不预读事件日志（懒加载约定）')
 
-  const after = mgr.listAllSessions().find((s) => s.id === 'a')!
-  assert.equal(after.updatedAt, before.updatedAt, '不得被磁盘记录覆盖')
-  assert.equal(after.status, before.status, '会话状态归持有它的那个进程管')
+  const replay = await mgr.getEventsAsync('c', 0)
+  assert.equal(replay?.events.length, 2, '首次打开必须回放完整历史')
+  assert.equal(replay?.lastSeq, 2)
+  assert.deepEqual(p.loadEventsCalls, ['c'], '懒加载在首次打开时触发')
+})
+
+
+// ── 已知会话的跨进程事件增量同步（issue #274 残留修复）────────────────────
+// 背景：桌面 sidecar 与手机端桥自起的 serve 是两个进程、同一个 home。事件扇出
+// 是进程内的（appendRaw → 本进程 listeners），此前跨进程只有「新会话发现」——
+// 已知会话被外部进程推进后，本进程内存环永不重读磁盘，桌面端 SSE 一帧都收不到，
+// 直到本进程自己开跑（懒恢复历史）才「发一条消息才刷新」。
+// 修复：扫描轮次里对**已加载且空闲**的已知会话做 stat 漂移检测 → 尾部重读 →
+// `seq > session.seq` 守卫合并 → 扇出给本进程 listeners。
+
+/** 在 LazyMemoryPersistence 上加 statEvents 探针（漂移 = 事件条数变化）。 */
+class SyncableMemoryPersistence extends LazyMemoryPersistence {
+  statEvents(id: string): { size: number; mtimeMs: number } | undefined {
+    const n = (this.events.get(id) ?? []).length
+    return { size: n, mtimeMs: n }
+  }
+}
+
+/** adoptExternalSessions 现在返回事件层合并 promise——测试等它落定再断言。 */
+async function adoptAndSettle(mgr: RuntimeSessionManager): Promise<void> {
+  const merges = (mgr as unknown as { adoptExternalSessions(): Promise<void>[] }).adoptExternalSessions()
+  await Promise.all(merges)
+}
+
+test('外部进程追加的事件被合并进已加载会话，并实时扇出给本进程 listener', async () => {
+  const p = new SyncableMemoryPersistence([seeded('a', { lastSeq: 2 })])
+  p.appendEvent('a', ev(1, 'status', { status: 'running' }))
+  p.appendEvent('a', ev(2, 'text_delta', { text: 'desktop' }))
+  const changes: string[] = []
+  const mgr = new RuntimeSessionManager({
+    createAgent: () => new NoopAgent(),
+    persistence: p,
+    externalScanMs: 0,
+    onSessionsChanged: (reason) => changes.push(reason),
+  })
+
+  // 桌面端打开会话（加载日志）并订阅 SSE
+  await mgr.getEventsAsync('a', 0)
+  const received: SessionEvent[] = []
+  mgr.subscribe('a', (e) => received.push(e))
+
+  // 手机端进程推进会话：新事件 + record 前进
+  p.appendEvent('a', ev(3, 'text_delta', { text: 'mobile' }))
+  p.appendEvent('a', ev(4, 'turn_complete', {}))
+  p.saveRecord({ ...seeded('a').record, status: 'running', updatedAt: 500, lastSeq: 4 })
+
+  await adoptAndSettle(mgr)
+
+  assert.deepEqual(received.map((e) => e.seq), [3, 4], '外部新事件必须实时扇出')
+  const tail = mgr.getEvents('a', 2)
+  assert.deepEqual(tail?.events.map((e) => e.seq), [3, 4], '内存环/重放立即包含外部事件')
+  const rec = mgr.listAllSessions().find((s) => s.id === 'a')!
+  assert.equal(rec.status, 'running', 'record 层同步让列表看到外部进行中状态')
+  assert.equal(rec.lastSeq, 4)
+  assert.ok(changes.includes('external'), '外部进度推 sessions_changed')
+
+  // 幂等：磁盘不再变化时重扫不重读、不重发
+  const callsBefore = p.loadEventsCalls.length
+  await adoptAndSettle(mgr)
+  assert.equal(p.loadEventsCalls.length, callsBefore, '无漂移不做尾部重读')
+  assert.equal(received.length, 2, '不重复扇出')
+})
+
+test('seq 守卫：本进程已覆盖的序号不被外部旧事件重复合并', async () => {
+  const p = new SyncableMemoryPersistence([seeded('a', { lastSeq: 2 })])
+  p.appendEvent('a', ev(1, 'status', { status: 'running' }))
+  p.appendEvent('a', ev(2, 'text_delta', { text: 'old' }))
+  const mgr = new RuntimeSessionManager({
+    createAgent: () => new NoopAgent(),
+    persistence: p,
+    externalScanMs: 0,
+  })
+  await mgr.getEventsAsync('a', 0)
+  const received: SessionEvent[] = []
+  mgr.subscribe('a', (e) => received.push(e))
+
+  // 外部进程的日志里混着 seq ≤ 当前水位的旧事件（并发写交织形态）
+  p.appendEvent('a', ev(2, 'text_delta', { text: 'stale-dup' }))
+  p.appendEvent('a', ev(3, 'text_delta', { text: 'genuinely-new' }))
+
+  await adoptAndSettle(mgr)
+
+  assert.deepEqual(received.map((e) => e.seq), [3], '只有越过水位的 event 被采纳')
+  assert.deepEqual(
+    mgr.getEvents('a', 0)?.events.map((e) => e.seq),
+    [1, 2, 3],
+    '内存环不出现重复 seq',
+  )
+})
+
+test('未加载（懒）会话不做事件层同步——不为他读日志，首开时全量自取', async () => {
+  const p = new SyncableMemoryPersistence([seeded('a'), seeded('b', { lastSeq: 1 })])
+  p.appendEvent('b', ev(1, 'text_delta', { text: 'external' }))
+  const mgr = new RuntimeSessionManager({
+    createAgent: () => new NoopAgent(),
+    persistence: p,
+    externalScanMs: 0,
+  })
+
+  await adoptAndSettle(mgr)
+  assert.deepEqual(p.loadEventsCalls, [], '未加载会话不触发事件日志读取')
+
+  // 首开时经懒加载拿到外部整本日志（含扫描前就有的事件）
+  const replay = await mgr.getEventsAsync('b', 0)
+  assert.equal(replay?.events.length, 1)
+  assert.deepEqual(p.loadEventsCalls, ['b'], '懒加载路径不变')
+})
+
+test('本进程 running 的会话不做事件层合并（并发写归本进程管）', async () => {
+  const p = new SyncableMemoryPersistence([seeded('a', { lastSeq: 1 })])
+  p.appendEvent('a', ev(1, 'text_delta', { text: 'mine' }))
+  const mgr = new RuntimeSessionManager({
+    createAgent: () => new NoopAgent(),
+    persistence: p,
+    externalScanMs: 0,
+  })
+  await mgr.getEventsAsync('a', 0)
+  const received: SessionEvent[] = []
+  mgr.subscribe('a', (e) => received.push(e))
+
+  const internal = (mgr as unknown as { sessions: Map<string, { running: boolean }> }).sessions
+  internal.get('a')!.running = true
+  p.appendEvent('a', ev(2, 'text_delta', { text: 'external' }))
+
+  await adoptAndSettle(mgr)
+  assert.equal(received.length, 0, 'running 会话不收外部事件')
+  assert.deepEqual(mgr.getEvents('a', 1)?.events.length, 0, '内存环不合并')
+
+  // 本进程跑完（running 复位）后，下一轮扫描把外部进度追回来
+  internal.get('a')!.running = false
+  await adoptAndSettle(mgr)
+  assert.deepEqual(received.map((e) => e.seq), [2], '空闲后外部进度被追上')
 })

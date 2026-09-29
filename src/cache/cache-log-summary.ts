@@ -1,4 +1,6 @@
 export interface CacheLogRecord {
+  input?: unknown
+  usageFields?: Record<string, string>
   turn?: unknown
   hitRate?: unknown
   cacheRead?: unknown
@@ -65,9 +67,9 @@ function summarizeMetric(records: readonly CacheLogRecord[], read: (record: Cach
 function summarizeGroup(records: readonly CacheLogRecord[]): CacheLogGroupSummary {
   const weightedRows = records.flatMap(record => {
     const cacheRead = numberValue(record.cacheRead)
-    const cacheCreate = numberValue(record.cacheCreate)
-    if (cacheRead === undefined || cacheCreate === undefined || cacheRead < 0 || cacheCreate < 0) return []
-    const total = cacheRead + cacheCreate
+    const total = numberValue(record.input)
+    if (cacheRead === undefined || total === undefined || cacheRead < 0 || cacheRead > total
+      || (record.usageFields && (!record.usageFields.input_tokens || !record.usageFields.cache_read_input_tokens))) return []
     return total > 0 ? [{ cacheRead, total }] : []
   })
   const weightedTotal = weightedRows.reduce((sum, row) => sum + row.total, 0)
@@ -86,7 +88,7 @@ function summarizeGroup(records: readonly CacheLogRecord[]): CacheLogGroupSummar
       known: weightedRows.length,
       unknown: records.length - weightedRows.length,
     },
-    cacheCreate: summarizeMetric(records, record => numberValue(record.cacheCreate)),
+    cacheCreate: summarizeMetric(records, record => record.usageFields && !record.usageFields.cache_creation_input_tokens ? undefined : numberValue(record.cacheCreate)),
     ttftMs: summarizeMetric(records, record => numberValue(record.ttftMs)),
     outputRawBytes: summarizeMetric(records, record => numberValue(record.outputRawBytes)),
     outputTrimmedBytes: summarizeMetric(records, record => numberValue(record.outputTrimmedBytes)),

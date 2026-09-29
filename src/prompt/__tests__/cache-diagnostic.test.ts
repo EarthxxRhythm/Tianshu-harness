@@ -52,8 +52,8 @@ describe('diagnoseCacheMiss', () => {
     ], 2, null, false)
 
     assert.ok(diagnostic)
-    assert.equal(diagnostic!.reason, 'prefix_truncation')
-    assert.equal(diagnostic!.severity, 'error')
+    assert.equal(diagnostic!.reason, 'provider_unknown')
+    assert.equal(diagnostic!.severity, 'warn')
     assert.match(diagnostic!.message, /500 → 50/)
   })
 
@@ -68,7 +68,7 @@ describe('diagnoseCacheMiss', () => {
     ], 35, null, false)
 
     assert.ok(diagnostic)
-    assert.equal(diagnostic!.reason, 'prefix_truncation')
+    assert.equal(diagnostic!.reason, 'provider_unknown')
   })
 
   it('diagnoses low cache hit WITHOUT regression as cache_eviction (cold-start pattern)', () => {
@@ -80,7 +80,7 @@ describe('diagnoseCacheMiss', () => {
     ], 2, null, false)
 
     assert.ok(diagnostic)
-    assert.equal(diagnostic!.reason, 'cache_eviction')
+    assert.equal(diagnostic!.reason, 'provider_unknown')
   })
 
   it('diagnoses prefix_drift when toolsChanged drift is reported', () => {

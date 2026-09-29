@@ -383,6 +383,9 @@ export function buildSessionRoutes(
         return { status: 400, body: { error: docsCheck.error } }
       }
       let prompt = data.prompt
+      // issue #300 — promptText（用户实际输入）与 documents 原文随 createSession
+      // 透传：首轮 user 事件即带附件卡片元数据。
+      const promptText = docsCheck.documents?.length ? (prompt ?? '') : undefined
       if (docsCheck.documents && docsCheck.documents.length > 0) {
         const docTexts = await extractDocumentsToText(docsCheck.documents)
         if (docTexts) prompt = `${docTexts}\n\n${prompt ?? ''}`
@@ -393,6 +396,8 @@ export function buildSessionRoutes(
         title: data.title,
         prompt,
         images: imagesCheck.images,
+        documents: docsCheck.documents,
+        promptText,
         // P1 — 显式关联已有 Mission（桌面端「同任务再开一个会话」）。
         missionId: typeof data.missionId === 'string' && data.missionId.trim() ? data.missionId : undefined,
         approvalMode: data.approvalMode as ApprovalMode | undefined,
@@ -984,6 +989,9 @@ export function buildSessionRoutes(
       // session-manager.run 是同步入口，抽取是异步——故在 route 层（async handler）
       // 完成抽取，拼进 prompt 后调 run（签名不变）。和 vision bridge 同模式：
       // 把非文本附件转成文本注入 prompt。
+      // issue #300 — documents 原文与 promptText（用户实际输入，抽取前置前）随
+      // run 透传：user 事件携带附件卡片元数据，UI 气泡显示原文而非拼接全文。
+      const promptText = documents?.length ? prompt : undefined
       if (documents && documents.length > 0) {
         const docTexts = await extractDocumentsToText(documents)
         if (docTexts) {
@@ -1002,7 +1010,7 @@ export function buildSessionRoutes(
           return { status: 400, body: { error: 'Invalid requestId' } }
         }
         try {
-          const result = await manager.submitRun(params!.id!, prompt, images, data.requestId)
+          const result = await manager.submitRun(params!.id!, prompt, images, data.requestId, { documents, promptText })
           if (!result.ok) return { status: result.code === 'not_found' ? 404 : 409, body: { error: result.code } }
           return { status: 200, body: { ...manager.getSession(params!.id!), receipt: 'receipt' in result ? result.receipt : undefined } }
         } catch (error) {
@@ -1012,7 +1020,7 @@ export function buildSessionRoutes(
           return { status: 503, body: { error: 'Could not durably accept request; retry with the same requestId', code: 'request_persistence_failed' } }
         }
       }
-      const ok = manager.run(params!.id!, prompt, images)
+      const ok = manager.run(params!.id!, prompt, images, false, undefined, { documents, promptText })
       // 区分两种拒绝：session 缺失（404，前端可提示重新打开）与执行中（409 busy，
       // 前端显示"正在执行中"而非错误 toast——用户连续发消息时这是正常排队语义）。
       if (!ok) {
@@ -1132,7 +1140,7 @@ export function buildSessionRoutes(
       const result = manager.queue(id, data.text.trim(), {
         ...(images?.length ? { images } : {}),
         ...(attachmentText ? { attachmentText } : {}),
-        ...(documents?.length ? { documentNames: documents.map((d) => d.name) } : {}),
+        ...(documents?.length ? { documentNames: documents.map((d) => d.name), documents } : {}),
       })
       if (result === 'not_found') return { status: 404, body: { error: 'Session not found' } }
       if (result === 'idle') {
@@ -2022,6 +2030,23 @@ export function buildSessionRoutes(
       return { status: 200, handled: true }
     }, apiToken),
 
+    // issue #300 — serve a persisted user-attached document (PDF/Office) by id.
+    // 与 images 路由同构：Bearer + 二进制回读，桌面端附件卡片点击预览/下载用。
+    'GET /sessions/:id/documents/:docId': withAuth((_body, params, headers, res) => {
+      if (!res) return { status: 500, body: { error: 'Response stream is unavailable' } }
+      const doc = manager.readDocument(params!.id!, params!.docId!)
+      if (!doc) return { status: 404, body: { error: 'Document not found' } }
+      const origin = allowedCorsOrigin(headers ?? {})
+      res.writeHead(200, {
+        'Content-Type': doc.mime,
+        'Content-Length': doc.bytes.length,
+        'Cache-Control': 'private, max-age=31536000, immutable',
+        ...(origin ? { 'Access-Control-Allow-Origin': origin } : {}),
+      })
+      res.end(doc.bytes)
+      return { status: 200, handled: true }
+    }, apiToken),
+
     // R3 — rollback preview. Returns the agent-owned files that would be
     // restored, files skipped because a peer session owns them, AND any
     // irreversible bash side effects file rollback CANNOT undo. The returned
@@ -2061,6 +2086,11 @@ export function buildSessionRoutes(
     }, apiToken),
 
     // ── Rewind: truncate conversation to a prior message index ──
+    'POST /sessions/:id/compact': withAuth(async (_body, params) => {
+      try { return { status: 200, body: await manager.compactContext(params!.id!) } }
+      catch (error) { return { status: (error as { status?: number }).status ?? 500, body: { error: error instanceof Error ? error.message : String(error) } } }
+    }, apiToken),
+
     'POST /sessions/:id/rewind': withAuth(async (body, params) => {
       const data = (body ?? {}) as { messageIndex?: number; rollbackFiles?: boolean }
       if (typeof data.messageIndex !== 'number' || data.messageIndex < 0) {

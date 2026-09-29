@@ -68,9 +68,10 @@ jobs:
         working-directory: desktop
         run: node scripts/fetch-node-runtime.js
 
-      # tauri:build:appimage = tauri build --bundles appimage + repack-appimage-pango.sh
-      # （issue #80：内置新 pango 需要 harfbuzz≥3.3 符号，与 22.04 系统 harfbuzz 2.7.4
-      # 错配导致启动即崩——剔除内置 pango 改走系统配套链，本地手动构建也用同一入口）
+      # tauri:build:appimage = tauri build --bundles appimage + postprocess-linux-appimage.sh
+      # （图形栈全系统化 + 运行时完整性对账：issue #80/#286——把包内旧 GLib 与系统新
+      # pango 混用会在 Arch/Fedora 启动即崩；打包链改写过的原生模块字节按签名清单复原。
+      # 本地手动构建与容器构建走同一入口）
       - name: Build Tauri app (AppImage)
         working-directory: desktop
         run: npm run tauri:build:appimage

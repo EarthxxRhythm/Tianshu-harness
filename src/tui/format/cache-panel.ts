@@ -5,8 +5,10 @@
  * usage-aggregator 跨会话数据）→ 官方区（platform 登录账单或 API key 余额）。
  * 纯渲染函数，framework-agnostic（ansi/theme only），数据由 main.ts provider 注入。
  *
- * 口径标注：本地命中率 = ΣcacheRead/Σinput（主请求行），官方命中率 =
- * hit/(hit+miss)——两者分母不同，UI 上分别标注，不混算。
+ * 口径标注：本地命中率 = ΣcacheRead/Σinput（主请求行），两口径分叉时并列
+ * 账单口径 billedHitRate = ΣcacheRead/Σinput（全量行，与 billed-hit-rate.ts
+ * 同义——侧路/重试行在差命中率上堆积时「成本涨、主轮命中率不动」靠它显形）；
+ * 官方命中率 = hit/(hit+miss)——分母各不同，UI 上分别标注，不混算。
  */
 import { color } from '../engine/ansi.js'
 import type { RivetTheme } from '../theme.js'
@@ -31,6 +33,7 @@ export interface CachePanelSession {
   input: number
   output: number
   cacheRead: number
+  cacheCreateUnreported?: boolean
   cacheCreate: number
   /** null = 无 pricing 可算 */
   cost: number | null
@@ -108,7 +111,7 @@ export function renderCachePanel(
     out.push(
       `  命中率 ${color(`⚡ ${formatRate(s.hitRate)}`, rateColor(s.hitRate, theme))}`
       + `   输入 ${formatTokens(s.input)}`
-      + color(` (读 ${formatTokens(s.cacheRead)} · 建 ${formatTokens(s.cacheCreate)})`, theme.dim)
+      + color(` (读 ${formatTokens(s.cacheRead)} · 建 ${(s.cacheCreateUnreported ? '未报告／部分报告' : formatTokens(s.cacheCreate))})`, theme.dim)
       + ` · 输出 ${formatTokens(s.output)}`,
     )
     if (s.cost !== null) {
@@ -138,12 +141,23 @@ export function renderCachePanel(
     out.push(
       `  请求 ${t.requests}${t.sidePathRequests > 0 ? color(` (+侧路 ${t.sidePathRequests})`, theme.dim) : ''}`
       + `   输入 ${formatTokens(t.input)} · 输出 ${formatTokens(t.output)}`
-      + `   命中率 ${color(formatRate(t.hitRate), rateColor(t.hitRate, theme))}`,
+      + `   命中率 ${color(formatRate(t.hitRate), rateColor(t.hitRate, theme))}`
+      // 判据是「两口径实际不同」而非「有侧路行」：除 side_path 外，retry
+      // (stream_attempt_aborted) 与主轮用量未报告行同样只进 billed 分母，此时
+      // sidePathRequests 为 0，枚举式判据会漏掉整类分叉。反向失效是安全的——
+      // 数值巧合相等时只是少显示一列，不会显示错。
+      + (t.billedHitRate !== t.hitRate
+        ? color('（主轮）', theme.dim)
+          + ` 账单口径 ${color(formatRate(t.billedHitRate), rateColor(t.billedHitRate, theme))}`
+        : ''),
     )
     out.push(
       `  成本 ¥${formatYuan(t.cost)}`
       + (t.savings > 0 ? `   缓存节省 ${color(`¥${formatYuan(t.savings)}`, theme.success)}` : ''),
     )
+
+    if (t.prefixStableRate !== undefined) out.push(color(`  客户端前缀稳定率 ${formatRate(t.prefixStableRate)}（${t.prefixSamples} 次观测）`, theme.dim))
+    if (t.hitRateUnknown) out.push(color(`  ${t.hitRateUnknown} 次用量未报告，未计入命中率`, theme.dim))
 
     // 按天迷你柱（近 N 天，受视口高度约束）
     const officialLines = 4

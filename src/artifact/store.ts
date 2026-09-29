@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, writeFile, open } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync, rmSync, createReadStream } from 'node:fs'
 import { createInterface } from 'node:readline'
@@ -86,6 +86,26 @@ export class ArtifactStore {
     return new ArtifactStore(this.baseDir, sessionId, { now: this.now, idGenerator: this.idGenerator })
   }
 
+  async saveDurable(input: SaveArtifactInput): Promise<string> {
+    const id = await this.save(input)
+    await this.confirmDurable(id)
+    return id
+  }
+
+  async confirmDurable(id: string): Promise<void> {
+    const artifact = this.get(id)
+    if (!artifact) throw new Error('Artifact is not indexed')
+    // Windows FlushFileBuffers requires a writable file handle.
+    for (const path of [artifact.rawPath, this.indexPath()]) {
+      const file = await open(path, 'r+')
+      try { await file.sync() } finally { await file.close() }
+    }
+    if (process.platform !== 'win32') {
+      const directory = await open(this.dir, 'r')
+      try { await directory.sync() } finally { await directory.close() }
+    }
+  }
+
   async save(input: SaveArtifactInput): Promise<string> {
     await mkdir(this.dir, { recursive: true })
 
@@ -107,8 +127,8 @@ export class ArtifactStore {
       sha256: sha256(input.rawContent),
     }
 
-    this.artifacts.set(id, artifact)
     await appendFile(this.indexPath(), `${JSON.stringify(artifact)}\n`, 'utf-8')
+    this.artifacts.set(id, artifact)
     return id
   }
 

@@ -19,11 +19,6 @@
   或素材；上游示例壁纸亦不作为内置素材随包发布。上游本体是 Wallpaper Engine
   场景渲染器（JS + GLSL，`lib/we-renderer/**`），与本项目的实现语言、抽象层次
   及功能范围都不同——本项目首期不含场景播放、视频与网页壁纸。
-- 上游作者与核心开发：<https://github.com/elysia395>（作者）、
-  <https://github.com/YV3507>、<https://github.com/yuxilao>、<https://github.com/oneincase>。
-  四位同时是本项目「自定义壁纸与分区玻璃」的**壁纸引擎渲染技术顾问**——在壁纸合成
-  与分区玻璃材质的设计、实现过程中提供了指导（README 四语言的「致谢 / Acknowledgments」
-  一节亦有署名）。
 - 上游许可：MIT License
 
 ```

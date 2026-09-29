@@ -159,6 +159,8 @@ related: [../reference/observability-harness.md, ../user-guide-sandbox-permissio
 
 **现象 D：连接超时 / `ECONNRESET` / 连不上 443。** 多为防火墙的应用程序规则拦了出站（新装的"未知发布者"默认询问或阻止；`node.exe` 常需单独放行）。放行后仍不通，就走代理：`rivet config set-proxy http://127.0.0.1:7890`（或设置 → 网络），也可在 provider 上单配 `proxy`。
 
+**现象 E：界面能打开、但 agent 完全不可用（发消息没反应），sidecar 日志刷 `integrity-blocked: file_count_mismatch`。** 这是杀毒软件**行为检测**（卡巴斯基 PDM）拦在了 sidecar 的宿主形态上：它把「`node.exe` 执行 `rivet-runtime\cli\entry.js`」判为 `PDM:Trojan.Win32.Generic`，动作是结束进程**并隔离那个脚本文件**。文件没了，壳启动前的完整性自检就会拒绝拉起 sidecar——所以表现是"界面正常但什么都不干"，而且手动把文件还原也没用（sidecar 一执行又会在约 1 秒内被删）。先试 受信任应用程序 里放行安装目录下的 `node.exe`；企业策略不允许加白时，见 [`docs/known-issues/2026-09-26-windows-kaspersky-sidecar-pdm.md`](../known-issues/2026-09-26-windows-kaspersky-sidecar-pdm.md) 的用户侧规避方案（把 sidecar 宿主换成 electron）——**那是社区用户自建的规避路径、非官方支持**，照做前先读该篇第 5 节的代价（原生模块 ABI 降级等）。
+
 ## 12. npm 全局安装 / 升级失败（EEXIST / EPERM）
 
 CLI 通过 `npm install -g tianshu-harness` 安装与升级。若中途失败，日志尾部通常是一行 `npm error code EEXIST`——但**真正的起点往往在更上面**。先分清是下面两种中的哪一种：

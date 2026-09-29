@@ -21,7 +21,8 @@ import { touchActivity, setActivityPhase, beginRun as beginActivityRun, finishRu
 import { randomUUID } from 'node:crypto'
 import { describeFailure } from '../api/failure-scope.js'
 import { debugLog } from '../utils/debug.js'
-import { collectPostBoundaryEditIds } from '../agent/file-history.js'
+import { collectPostBoundaryEditIds, type BlockedRewindFile } from '../agent/file-history.js'
+import { makeOwnershipGuard } from '../agent/checkpoint.js'
 import { loadConfig } from '../config/manager.js'
 import { rivetHome } from '../config/paths.js'
 import type { DelegationActivity, Tool } from '../tools/types.js'
@@ -72,8 +73,10 @@ import { skillRegistry, loadProjectSkills, listInstallableSkills, importSkillsIn
 import { getSkillLoadErrorsForSession } from './skill-load-errors.js'
 import type { MissionStore } from './mission-store.js'
 import { join, resolve, dirname } from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { existsSync, copyFileSync, statSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { renderPdfPageImages } from '../tools/doc-extract.js'
 import { resolveSessionWorkspaceForSession, type SessionWorkspaceMode } from './workspace.js'
 import { stripTerminalEscapes } from '../utils/safe-path.js'
 import { createWorktree, removeWorktree, listWorktrees, hasUnlandedWork, commitAll, revParseHead, squashMergeBranch, pushBranch, type WorktreeEntry } from '../agent/worktree.js'
@@ -425,6 +428,8 @@ export interface ManagedAgent {
   setDisabledSkills?(names: Set<string>): void
   /** Estimated token count for the current conversation (including prefix overhead). */
   getEstimatedTokens?(): number
+  compactContext?(): Promise<boolean>
+  getContextBudget?(): import('./protocol.js').ContextBudgetSnapshot | undefined
   /**
    * Cumulative session usage snapshot (`SessionContext.getTotalUsage()`).
    * 中断收尾补发 turn_complete 用它——被打断的 run 走不到 natural-finish，
@@ -557,6 +562,12 @@ export interface CreateSessionInput {
   /** 新建即携带的图片附件（dataUrl 数组）——首轮 run 经 run(id, prompt, images)
    *  进 persistImages + agent.run，与会话内 /prompt 粘图同管线。 */
   images?: string[]
+  /** issue #300 — 新建即携带的文档附件（原文持久化 + user 事件卡片元数据 +
+   *  PDF 页图给 vision 模型）。文本抽取在路由层完成并前置进 prompt。 */
+  documents?: SessionDocumentInput[]
+  /** 用户在输入框实际键入的文本（slash 翻译后、抽取前置前）——user 事件随
+   *  documents 携带，UI 以此渲染气泡而非模型可见的拼接全文。 */
+  promptText?: string
   /** P1 — 显式指定关联的 Mission id。不传则按 title 自动 getOrCreate。 */
   missionId?: string
   approvalMode?: ApprovalMode
@@ -698,6 +709,13 @@ export interface SessionPersistenceAdapter {
    */
   loadEventsTailAsync?(sessionId: string, maxEvents: number): Promise<EventsTail>
   /**
+   * 事件日志文件的轻量 stat（optional）——跨进程增量同步（issue #274 残留）的
+   * 漂移探针：扫描循环对每个已加载会话只做这一次 syscall，size/mtime 与上次
+   * 相同即跳过，不同才触发尾部重读合并。缺失时整层同步关闭（退回只发现新会话
+   * 的旧行为），内存适配器不实现即不受影响。
+   */
+  statEvents?(sessionId: string): { size: number; mtimeMs: number } | undefined
+  /**
    * 稀疏索引区间读（optional，冷通道分页加速）：返回 seq < before 的尾部
    * 窗口（至少 minCount 条，或到日志开头）。实现方只读覆盖窗口的字节区间，
    * 大日志分页不整本进内存；缺失时 getHistoryPage 退化为 loadEventsAsync
@@ -725,6 +743,14 @@ export interface SessionPersistenceAdapter {
   saveImage?(sessionId: string, imgId: string, base64: string, mime: string): void
   /** Read back a persisted image by id. Returns undefined if missing. */
   readImage?(sessionId: string, imgId: string): { bytes: Buffer; mime: string } | undefined
+  /**
+   * Persist a user-attached document's original bytes (issue #300: 附件卡片可
+   * 预览/下载原文)。与 saveImage 同构；`fileName` 只用于取扩展名。Optional —
+   * 缺省时事件流仍携带文档元数据，仅失去原文回读。
+   */
+  saveDocument?(sessionId: string, docId: string, base64: string, fileName: string): void
+  /** Read back a persisted document by id. Returns undefined if missing. */
+  readDocument?(sessionId: string, docId: string): { bytes: Buffer; mime: string; ext: string } | undefined
 }
 
 export interface RuntimeSessionManagerOptions {
@@ -904,6 +930,24 @@ export interface QueueLaneEntry {
   attachmentText?: string
   /** #238 — 文档附件名（UI chip 显示用；抽取正文不进事件流）。 */
   documentNames?: string[]
+  /** issue #300 — 入队时已持久化的文档引用（原文在入队时落盘，条目只留引用）。
+   *  归并时并入下轮 run 的 user 事件 documents 字段，卡片不随归并消失。 */
+  documents?: SessionDocumentRef[]
+}
+
+/** issue #300 — 入站文档附件（dataUrl 携原始字节；size/mime 客户端可选报，
+ *  服务端以解码结果为准自算 bytes）。 */
+export interface SessionDocumentInput {
+  name: string
+  dataUrl: string
+}
+
+/** 事件流中的文档引用——events.jsonl 只留这份小元数据，原文按 id 回读。 */
+export interface SessionDocumentRef {
+  id: string
+  name: string
+  bytes: number
+  mime: string
 }
 
 /**
@@ -975,6 +1019,15 @@ interface InternalSession {
    * 新建会话恒为 1；rehydrate/懒加载在 adoptLoadedEvents 里从全量读回填。
    */
   diskFirstSeq?: number
+  /**
+   * 跨进程增量同步（issue #274 残留）的漂移水位：本进程已合并进内存环的
+   * events.jsonl 文件 stat。undefined = 从未对账（首轮视为漂移，由 seq 守卫
+   * 兜底为 no-op）。仅事件层同步使用；会话逐出/卸载后随内存态一起消失。
+   */
+  externalSyncSize?: number
+  externalSyncMtimeMs?: number
+  /** 上一次外部事件合并仍在途——扫描轮次重叠时跳过，下轮再追。 */
+  externalSyncInFlight?: boolean
   seq: number
   running: boolean
   preparationController?: AbortController
@@ -1468,6 +1521,8 @@ export class RuntimeSessionManager {
     s.events = []
     s.knownArtifacts = new Set()
     s.eventsLoaded = false
+    s.externalSyncSize = undefined
+    s.externalSyncMtimeMs = undefined
     const i = this.loadedOrder.indexOf(s.record.id)
     if (i !== -1) this.loadedOrder.splice(i, 1)
   }
@@ -1484,41 +1539,165 @@ export class RuntimeSessionManager {
    * （`GET /sessions` 不返回、按 id 取 404，UI 只能重启才看得到）；这里定期补装并
    * 通知客户端重取。只增不覆盖：归档/删除归持有它的那个进程；外部新会话不可能
    * 处于 running，故不需要 rehydrate 里那套崩溃收尾（孤儿审批 / resume_offer）。
+   *
+   * 已知会话的两层跨进程同步（issue #274 残留——此前只发现新 id，已知会话的
+   * 事件/状态永不刷新，桌面端看不到手机端进度）：
+   *  1. record 层：磁盘记录更新（updatedAt/lastSeq 前进）时合并展示字段
+   *    （status/title/updatedAt/lastSeq），让会话列表跟上外部进度。
+   *  2. event 层：已加载且空闲的会话，events.jsonl 漂移（stat 变化）时尾部
+   *     重读，`seq > session.seq` 守卫只采纳外部新事件（本进程自己落盘的
+   *     事件天然被跳过），随即扇出给本进程 listeners——桌面端 SSE 实时可见。
+   * 本进程 running 的会话两层都跳过：并发写同一日志本就有 seq 交织风险，
+   * 同步只在「单向写入」（对端写、本端看）时才是良定义的。
+   *
+   * 返回值：本轮踢出的事件层合并 promise（调用方可忽略；测试用它等待异步合并
+   * 落定，避免依赖真实时序）。
    */
-  private adoptExternalSessions(): void {
+  private adoptExternalSessions(): Promise<void>[] {
     const p = this.persistence
-    if (!p || typeof p.loadRecords !== 'function') return
+    if (!p || typeof p.loadRecords !== 'function') return []
     let records: SessionRecord[]
-    try { records = p.loadRecords() } catch { return }
+    try { records = p.loadRecords() } catch { return [] }
     let adopted = 0
+    let recordMerged = false
+    const eventMerges: Promise<void>[] = []
     for (const rawRecord of records) {
       const id = rawRecord.id
-      if (!id || this.sessions.has(id)) continue
-      const rec = sanitizeSessionDomain(rawRecord)
-      this.sessions.set(id, {
-        record: { ...rec, lastSeq: rec.lastSeq, pendingApprovals: 0 },
-        agent: null,
-        events: [],
-        eventsLoaded: false,
-        seq: rec.lastSeq,
-        running: false,
-        lifecycleGeneration: 0,
-        pending: new Map(),
-        pendingDelegations: new Map(),
-        listeners: new Set(),
-        knownArtifacts: new Set(),
-        steer: new SteerBuffer(),
-        queueLane: [],
-        domainState: resolveDomainState(rec.domain ?? 'auto')?.state,
-        disabledSkills: new Set(),
-        skillLoadErrors: [],
-        reasoningEffort: rec.reasoningEffort as import('../agent/auto-reasoning.js').ReasoningEffort | 'auto' | undefined,
-        planAutoApproveUi: rec.planAutoApproveUi === true,
-        approvalMode: rec.approvalMode,
-      })
-      adopted++
+      if (!id) continue
+      const existing = this.sessions.get(id)
+      if (!existing) {
+        const rec = sanitizeSessionDomain(rawRecord)
+        this.sessions.set(id, {
+          record: { ...rec, lastSeq: rec.lastSeq, pendingApprovals: 0 },
+          agent: null,
+          events: [],
+          eventsLoaded: false,
+          seq: rec.lastSeq,
+          running: false,
+          lifecycleGeneration: 0,
+          pending: new Map(),
+          pendingDelegations: new Map(),
+          listeners: new Set(),
+          knownArtifacts: new Set(),
+          steer: new SteerBuffer(),
+          queueLane: [],
+          domainState: resolveDomainState(rec.domain ?? 'auto')?.state,
+          disabledSkills: new Set(),
+          skillLoadErrors: [],
+          reasoningEffort: rec.reasoningEffort as import('../agent/auto-reasoning.js').ReasoningEffort | 'auto' | undefined,
+          planAutoApproveUi: rec.planAutoApproveUi === true,
+          approvalMode: rec.approvalMode,
+        })
+        adopted++
+        continue
+      }
+      if (this.syncExternalRecord(existing, rawRecord)) recordMerged = true
+      if (!existing.running && existing.eventsLoaded && !existing.tombstoned) {
+        const merge = this.maybeSyncExternalEvents(existing)
+        if (merge) eventMerges.push(merge)
+      }
     }
-    if (adopted > 0) this.onSessionsChanged?.('external')
+    if (adopted > 0 || recordMerged) this.onSessionsChanged?.('external')
+    return eventMerges
+  }
+
+  /** record 层合并：只搬展示字段；本进程运行态字段（pendingApprovals/runId/
+   *  archived 等）不碰。返回是否有实质变化（驱动 sessions_changed 推送）。 */
+  private syncExternalRecord(session: InternalSession, disk: SessionRecord): boolean {
+    if (session.running || session.tombstoned) return false
+    const rec = session.record
+    const newer = (disk.updatedAt ?? 0) > rec.updatedAt
+    const seqAdvanced = (disk.lastSeq ?? 0) > rec.lastSeq
+    if (!newer && !seqAdvanced) return false
+    let changed = false
+    if (newer) {
+      if (disk.status !== rec.status) { rec.status = disk.status; changed = true }
+      if (typeof disk.title === 'string' && disk.title !== rec.title) { rec.title = disk.title; changed = true }
+      rec.updatedAt = disk.updatedAt
+      changed = true
+    }
+    if (seqAdvanced) {
+      rec.lastSeq = disk.lastSeq ?? rec.lastSeq
+      changed = true
+    }
+    return changed
+  }
+
+  /** event 层漂移检测：stat 与上次对账不同才踢出异步合并；在途合并未完时
+   *  不更新水位（下轮扫描自然再漂移、再追）。 */
+  private maybeSyncExternalEvents(session: InternalSession): Promise<void> | undefined {
+    const p = this.persistence
+    const statFn = p?.statEvents
+    if (!p || !statFn) return undefined
+    const id = session.record.id
+    let stat: { size: number; mtimeMs: number } | undefined
+    try { stat = statFn.call(p, id) } catch { return undefined }
+    if (!stat) return undefined
+    if (session.externalSyncSize === stat.size && session.externalSyncMtimeMs === stat.mtimeMs) return undefined
+    if (session.externalSyncInFlight) return undefined
+    session.externalSyncInFlight = true
+    return (async () => {
+      try {
+        await this.mergeExternalEvents(session, stat)
+      } catch {
+        // 同步只是加速通道——失败不致命，下轮扫描水位未前进自然重试
+      } finally {
+        session.externalSyncInFlight = false
+      }
+    })()
+  }
+
+  /** 尾部重读 + seq 守卫合并。失效方向刻意选「少做」：双进程并发写产生的
+   *  seq ≤ session.seq 的外部事件被跳过（等下次全量加载补齐），绝不重编号
+   *  污染 seq 语义（重放/续播游标都钉在磁盘序号上）。 */
+  private async mergeExternalEvents(
+    session: InternalSession,
+    stat: { size: number; mtimeMs: number },
+  ): Promise<void> {
+    const p = this.persistence!
+    const id = session.record.id
+    let candidates: SessionEvent[]
+    let artifactIds: string[] | undefined
+    let diskFirst: number | undefined
+    if (p.loadEventsTailAsync) {
+      const tail = await p.loadEventsTailAsync.call(p, id, this.maxEvents)
+      candidates = tail.events
+      artifactIds = tail.artifactIds
+      diskFirst = tail.diskFirstSeq
+    } else if (p.loadEventsAsync) {
+      candidates = await p.loadEventsAsync.call(p, id)
+    } else if (p.loadEvents) {
+      candidates = p.loadEvents.call(p, id)
+    } else {
+      return
+    }
+    // 水位只在读成功后前进——读失败下轮重试
+    session.externalSyncSize = stat.size
+    session.externalSyncMtimeMs = stat.mtimeMs
+    // 等待期间会话被逐出/卸载/替换 → 丢弃这份陈旧磁盘快照（同 ensureEventsAsync 的守卫）
+    if (this.sessions.get(id) !== session || !session.eventsLoaded || session.tombstoned) return
+    if (artifactIds) for (const a of artifactIds) session.knownArtifacts.add(a)
+    if (diskFirst !== undefined && diskFirst > (session.diskFirstSeq ?? 1)) session.diskFirstSeq = diskFirst
+    const novel = candidates.filter((e) => e.seq > session.seq).sort((a, b) => a.seq - b.seq)
+    if (novel.length === 0) return
+    for (const e of novel) {
+      session.events.push(e)
+      session.seq = Math.max(session.seq, e.seq)
+      if (e.type === 'artifact') session.knownArtifacts.add(String(e.data.id))
+      session.record.updatedAt = Math.max(session.record.updatedAt, e.ts)
+    }
+    if (session.events.length > this.maxEvents) {
+      session.events = trimEventRing(session.events, this.maxEvents)
+    }
+    session.record.lastSeq = session.seq
+    for (const e of novel) {
+      for (const listener of session.listeners) {
+        try { listener(e) } catch { /* 异常 viewer 不得打断同步 */ }
+      }
+    }
+    // 外部进度同时意味着列表该重取（status/updatedAt 已在上面的 record 层合并，
+    // 但「只有事件没有 record 变化」的场景——record 落盘本就滞后于事件流——靠这里补）
+    this.onSessionsChanged?.('external')
   }
 
   private rehydrate(): void {
@@ -2469,15 +2648,15 @@ export class RuntimeSessionManager {
     // attributed and reaped on crash. Best-effort: registry may be disabled.
     try { this.getRegistry?.()?.register(id, cwd, 'standalone') } catch { /* non-fatal */ }
     if (input.prompt && input.prompt.trim()) {
-      this.run(id, input.prompt, input.images)
+      this.run(id, input.prompt, input.images, false, undefined, { documents: input.documents, promptText: input.promptText })
     }
     return { ...session.record }
   }
 
-  async submitRun(id: string, prompt: string, images: string[] | undefined, requestId: string) {
+  async submitRun(id: string, prompt: string, images: string[] | undefined, requestId: string, opts?: { documents?: SessionDocumentInput[]; promptText?: string }) {
     if (!this.sessions.has(id)) return { ok: false as const, code: 'not_found' }
-    if (!this.runLedger) return { ok: this.run(id, prompt, images), code: 'busy' }
-    const receipt = await this.runLedger.accept(id, requestId, { prompt, images }, receipt => this.run(id, prompt, images, false, receipt))
+    if (!this.runLedger) return { ok: this.run(id, prompt, images, false, undefined, opts), code: 'busy' }
+    const receipt = await this.runLedger.accept(id, requestId, { prompt, images, documents: opts?.documents?.map((d) => d.name), promptText: opts?.promptText }, receipt => this.run(id, prompt, images, false, receipt, opts))
     return { ok: receipt.state !== 'rejected', code: 'busy', receipt }
   }
 
@@ -2518,7 +2697,14 @@ export class RuntimeSessionManager {
   }
 
   /** Start an agent run on an idle session. Returns false if missing or busy. */
-  run(id: string, prompt: string, images?: string[], recovery = false, receipt?: import('./run-ledger.js').RunReceipt): boolean {
+  run(
+    id: string,
+    prompt: string,
+    images?: string[],
+    recovery = false,
+    receipt?: import('./run-ledger.js').RunReceipt,
+    opts?: { documents?: SessionDocumentInput[]; documentRefs?: SessionDocumentRef[]; promptText?: string },
+  ): boolean {
     const session = this.sessions.get(id)
     if (!session || session.running) return false
     // 阶段 2 — 逻辑 runId：恢复台账用它把多次尝试归到同一逻辑运行。
@@ -2567,6 +2753,8 @@ export class RuntimeSessionManager {
     prompt = mergedQueue.prompt
     // #238 — 排队条目的图片并入本轮：顺序与文本一致（排队段在前、本轮新提交在后）。
     if (mergedQueue.images.length > 0) images = [...mergedQueue.images, ...(images ?? [])]
+    // issue #300 — 排队条目的文档引用并入本轮 user 事件（原文入队时已落盘）。
+    const queuedDocuments = mergedQueue.documents
     session.record.status = 'running'
     session.record.error = undefined
     // R1 — keep the registry heartbeat fresh while this session is active.
@@ -2606,7 +2794,7 @@ export class RuntimeSessionManager {
       pending = Promise.resolve().then(write).catch(storageFailure).finally(() => journalWrites.delete(pending))
       journalWrites.add(pending)
     }
-    const startWithAgent = (agent: ManagedAgent) => {
+    const startWithAgent = async (agent: ManagedAgent) => {
       // Abort/archive raced a dynamic serve-agent import — never start a turn.
       if (!ownsDurability() || session.record.status === 'aborted') {
         if (!runSettlement.settled) {
@@ -2621,19 +2809,42 @@ export class RuntimeSessionManager {
         }
         return
       }
+      // issue #300 — PDF 页图补偿通道：文本抽取丢图（图表/扫描件/版面），有
+      // vision 通路（原生多模态或识图桥）时把 PDF 前几页渲染成图并入 images。
+      // 失效方向选「少做」：无 poppler / 渲染失败 / 无 vision 通路 → 静默退回
+      // 纯文本（既有行为），绝不阻断 run。
+      const docInputs = opts?.documents
+      const pdfInputs = docInputs?.filter((d) => d.name.toLowerCase().endsWith('.pdf'))
+      if (pdfInputs?.length && agent.getVisionBridge?.()?.active) {
+        const budget = MAX_IMAGES - (images?.length ?? 0)
+        if (budget > 0) {
+          try {
+            const pageImages = await renderPdfPagesFromInputs(pdfInputs, Math.min(budget, PDF_PAGE_IMAGES_MAX))
+            if (pageImages.length > 0) images = [...(images ?? []), ...pageImages]
+          } catch { /* 页图是增强——失败退回纯文本 */ }
+        }
+      }
       // Persist each attached image as a standalone file and echo only small
       // reference ids into the event log — NOT the base64. This keeps events.jsonl
       // (and its full replay/restore) tiny while the model still receives the data
       // URLs inline via agent.run below.
       const imageIds = this.persistImages(id, images)
+      // issue #300 — 文档原文持久化 + user 事件携带引用元数据：附件卡片可见、
+      // 可回读原文；events.jsonl 只留 {id,name,bytes,mime} 小对象。来源三路：
+      // 本轮新带（persistDocuments）、排队归并（run 内 merge）、queue flush（调用方透传）。
+      const documentRefs = recovery
+        ? []
+        : [...queuedDocuments, ...(opts?.documentRefs ?? []), ...this.persistDocuments(id, docInputs)]
       // Snapshot "first user message" BEFORE appending — the auto-title hook
       // below needs to know whether this run is the conversation opener.
       const wasFirstUser = !session.events.some((e) => e.type === 'user')
       this.append(session, recovery ? 'recovery_status' : 'user', {
         text: prompt,
+        ...(opts?.promptText !== undefined && !recovery ? { promptText: opts.promptText } : {}),
         ...(images?.length
           ? { imageCount: images.length, ...(imageIds.length ? { imageIds } : {}) }
           : {}),
+        ...(documentRefs.length > 0 ? { documents: documentRefs } : {}),
       })
       this.append(session, 'status', { status: 'running' })
       // P2-B: emit a goal_state baseline snapshot on the first user message so
@@ -2786,7 +2997,9 @@ export class RuntimeSessionManager {
       if (agentOrPromise && typeof (agentOrPromise as Promise<ManagedAgent>).then === 'function') {
         void (agentOrPromise as Promise<ManagedAgent>).then(startWithAgent).catch(failEnsure)
       } else {
-        startWithAgent(agentOrPromise as ManagedAgent)
+        // startWithAgent 自 issue #300 起是 async（PDF 页图渲染）——同步路径同样
+        // 要接住 rejection，否则渲染期异常成 unhandled。
+        void Promise.resolve(startWithAgent(agentOrPromise as ManagedAgent)).catch(failEnsure)
       }
     }
     if (this.recoveryJournal) {
@@ -4150,7 +4363,7 @@ export class RuntimeSessionManager {
   queue(
     id: string,
     text: string,
-    attachments?: { images?: string[]; attachmentText?: string; documentNames?: string[] },
+    attachments?: { images?: string[]; attachmentText?: string; documentNames?: string[]; documents?: SessionDocumentInput[] },
   ): { laneId: string } | 'idle' | 'not_found' | 'image_budget' | 'document_budget' {
     const session = this.sessions.get(id)
     if (!session) return 'not_found'
@@ -4162,6 +4375,9 @@ export class RuntimeSessionManager {
     if (usage.documents + (attachments?.documentNames?.length ?? 0) > MAX_DOCUMENTS) return 'document_budget'
     // 排队跟进同样是用户参与——取消倒计时自动批准（与 steer 对齐）。
     this.cancelPlanAutoApprove(session, 'queue')
+    // issue #300 — 文档原文在入队时落盘（归并发生在下轮 run 的同步入口，
+    // 不能依赖届时还拿得到 dataUrl），条目只留引用。
+    const docRefs = this.persistDocuments(id, attachments?.documents)
     const entry: QueueLaneEntry = {
       id: `q${randomId()}`,
       text,
@@ -4170,6 +4386,7 @@ export class RuntimeSessionManager {
       ...(attachments?.images?.length ? { images: attachments.images } : {}),
       ...(attachments?.attachmentText ? { attachmentText: attachments.attachmentText } : {}),
       ...(attachments?.documentNames?.length ? { documentNames: attachments.documentNames } : {}),
+      ...(docRefs.length ? { documents: docRefs } : {}),
     }
     session.queueLane.push(entry)
     // #238 — 事件带附件计数：卡片据此持久显示附件 chip（不再依赖转瞬即逝的
@@ -4226,15 +4443,16 @@ export class RuntimeSessionManager {
     session: InternalSession,
     prompt: string,
     promptImageCount = 0,
-  ): { prompt: string; images: string[]; droppedImages: number } {
+  ): { prompt: string; images: string[]; droppedImages: number; documents: SessionDocumentRef[] } {
     const steerEntries = session.steer.getPendingEntries()
     const laneQueued = session.queueLane.filter((e) => e.status === 'queued')
     if (steerEntries.length === 0 && laneQueued.length === 0) {
-      return { prompt, images: [], droppedImages: 0 }
+      return { prompt, images: [], droppedImages: 0, documents: [] }
     }
     session.steer.clear()
     const sections: string[] = steerEntries.map((e) => e.text)
     const images: string[] = []
+    const documents: SessionDocumentRef[] = []
     let droppedImages = 0
     let notice = ''
     if (laneQueued.length > 0) {
@@ -4253,6 +4471,9 @@ export class RuntimeSessionManager {
       const laneSections = laneQueued.map((e, i) => {
         const kept = e.images?.slice(0, allocation.keepPerEntry[i] ?? 0) ?? []
         images.push(...kept)
+        // issue #300 — 文档引用随归并进入本轮 user 事件（原文入队时已落盘，
+        // 引用是小对象，merged 后保留无内存压力）。
+        if (e.documents?.length) documents.push(...e.documents)
         return e.attachmentText ? `${e.attachmentText}\n\n${e.text}` : e.text
       })
       sections.push(`${header}\n${laneSections.join('\n\n')}`)
@@ -4276,7 +4497,7 @@ export class RuntimeSessionManager {
     }
     const head = sections.join('\n\n')
     const mergedPrompt = notice ? `${head}\n\n${notice}\n\n${prompt}` : `${head}\n\n${prompt}`
-    return { prompt: mergedPrompt, images, droppedImages }
+    return { prompt: mergedPrompt, images, droppedImages, documents }
   }
 
   /** 注册 session 的 coordinator 引用（main.ts 在 agent 构建后调用）。 */
@@ -4502,6 +4723,7 @@ export class RuntimeSessionManager {
     const record = { ...s.record }
     if (s.agent) {
       try { record.contextTokens = s.agent.getEstimatedTokens?.() } catch { /* non-fatal */ }
+      try { record.contextBudget = s.agent.getContextBudget?.() ?? record.contextBudget } catch { /* non-fatal */ }
       try { record.contextWindow = s.agent.getContextWindow?.() } catch { /* non-fatal */ }
       // Prefer the user's explicit effort selection (including 'auto') over the
       // agent's current concrete level, so the desktop chip reflects the mode
@@ -4678,6 +4900,26 @@ export class RuntimeSessionManager {
    * stop (record.status still 'running') — waiting there would only delay the
    * same 409 the caller gets today.
    */
+  async compactContext(id: string): Promise<{ changed: boolean }> {
+    const session = this.sessions.get(id)
+    if (!session) throw Object.assign(new Error('Session not found'), { status: 404 })
+    if (session.running || session.activeRunSettlement) throw Object.assign(new Error('请等待当前任务结束后整理上下文'), { status: 409 })
+    session.running = true
+    try {
+      const agent = await this.ensureAgentAsync(session)
+      if (!agent.compactContext) throw Object.assign(new Error('当前执行后端不支持安全整理'), { status: 409 })
+      this.append(session, 'phase', { phase: 'compacting', reason: '正在整理上下文' })
+      const changed = await agent.compactContext()
+      const budget = agent.getContextBudget?.()
+      if (budget) { session.record.contextBudget = budget; this.append(session, 'context_budget', { ...budget }) }
+      this.persistRecord(session)
+      return { changed }
+    } finally {
+      session.running = false
+      this.append(session, 'phase', { phase: 'idle' })
+    }
+  }
+
   async waitForRunSettled(id: string, timeoutMs = 10_000): Promise<boolean> {
     const s = this.sessions.get(id)
     if (!s) return false
@@ -5624,7 +5866,10 @@ export class RuntimeSessionManager {
   previewFilesPrecise(
     id: string,
     messageIndex: number,
-  ): { available: boolean; files: { path: string; action: 'restore' | 'delete' | 'unreadable' }[] } | undefined {
+  ): {
+    available: boolean
+    files: { path: string; action: 'restore' | 'delete' | 'unreadable' | 'blocked'; blockedBy?: string }[]
+  } | undefined {
     const s = this.sessions.get(id)
     if (!s) return undefined
     const fh = s.agent?.getFileHistory?.()
@@ -5632,30 +5877,53 @@ export class RuntimeSessionManager {
     const msgs = s.agent.getMessages()
     if (messageIndex < 0 || messageIndex >= msgs.length) return { available: false, files: [] }
     const ids = collectPostBoundaryEditIds(msgs, messageIndex)
-    const files = fh.getBoundaryFiles(ids)
+    const files = fh.getBoundaryFiles(ids, this.ownershipGuardFor(s))
     return { available: files.length > 0, files }
+  }
+
+  /** Cross-session claim guard for precise rewind — the same makeOwnershipGuard
+   *  the coarse checkpoint rollback uses, so both rollback paths skip files
+   *  another live session is editing instead of clobbering them. */
+  private ownershipGuardFor(s: InternalSession): ReturnType<typeof makeOwnershipGuard> | undefined {
+    const registry = this.getRegistry?.()
+    return registry ? makeOwnershipGuard(registry, s.record.id, s.record.cwd) : undefined
   }
 
   /**
    * Precise (per-message) code rewind: restore every agent-edited file to its
    * content as of the selected message; delete files created after it. Does NOT
    * truncate the conversation (that's the separate rewind() path). Rejects while
-   * running (unsafe to restore files under an active writer).
+   * running (unsafe to restore files under an active writer). Files exclusively
+   * claimed by another live session are skipped and surfaced in `skipped`
+   * (never silently overwritten — the write tools already fail closed there).
    */
   async rewindFilesPrecise(
     id: string,
     messageIndex: number,
-  ): Promise<{ success: boolean; filesChanged: string[] } | undefined> {
+  ): Promise<{
+    success: boolean
+    filesChanged: string[]
+    skipped: string[]
+    skippedBy: BlockedRewindFile[]
+  } | undefined> {
     const s = this.sessions.get(id)
     if (!s) return undefined
-    if (s.running) return { success: false, filesChanged: [] }
+    const notRun = { success: false, filesChanged: [], skipped: [], skippedBy: [] }
+    if (s.running) return notRun
     const fh = s.agent?.getFileHistory?.()
-    if (!s.agent || !fh) return { success: false, filesChanged: [] }
+    if (!s.agent || !fh) return notRun
     const msgs = s.agent.getMessages()
-    if (messageIndex < 0 || messageIndex >= msgs.length) return { success: false, filesChanged: [] }
+    if (messageIndex < 0 || messageIndex >= msgs.length) return notRun
     const ids = collectPostBoundaryEditIds(msgs, messageIndex)
-    const filesChanged = await fh.rewindToBoundary(ids)
-    return { success: true, filesChanged }
+    const changed = await fh.rewindToBoundary(ids, this.ownershipGuardFor(s))
+    // Defensive against lightweight test doubles that return the legacy plain
+    // string[] (no attached report): never surface undefined as filesChanged.
+    return {
+      success: true,
+      filesChanged: Array.isArray(changed.filesChanged) ? changed.filesChanged : [...changed],
+      skipped: Array.isArray(changed.skipped) ? changed.skipped : [],
+      skippedBy: Array.isArray(changed.skippedBy) ? changed.skippedBy : [],
+    }
   }
 
   // ── internals ─────────────────────────────────────────────────
@@ -5949,6 +6217,10 @@ export class RuntimeSessionManager {
           if (items && items.length > 0) this.append(session, 'todo_state', { items })
         }
         this.scanArtifacts(session)
+      },
+      onContextBudget: budget => {
+        session.record.contextBudget = budget
+        this.append(session, 'context_budget', { ...budget })
       },
       onTurnComplete: (usage, turnNumber, isFinal, evidenceSummary, continuationReason) => {
         if (!isActive()) return
@@ -6293,10 +6565,14 @@ export class RuntimeSessionManager {
         if (!mergedText) return
         // #238 — 排队条目的图片随 flush 起的新 run 一并发送：归并已把 data URL
         // 从条目上释放，此处必须显式透传，否则附件会被静默丢掉。
+        // issue #300 — 文档引用同构透传（原文入队时已落盘，refs 是小对象）。
         this.run(
           session.record.id,
           mergedText,
           merged.images.length > 0 ? merged.images : undefined,
+          false,
+          undefined,
+          { documentRefs: merged.documents.length > 0 ? merged.documents : undefined },
         )
       } catch {
         // best-effort：flush 失败不回滚已 merged 的 lane（文本已 echo 在流中、
@@ -6837,6 +7113,36 @@ export class RuntimeSessionManager {
     return this.persistence?.readImage?.(sessionId, imgId)
   }
 
+  /**
+   * 文档附件原文落盘，返回事件流引用（issue #300）。与 persistImages 同款
+   * best-effort：单个失败跳过，不阻断 run——抽取文本已进 prompt，卡片只少一个
+   * 可回读条目。bytes/mime 以服务端解码自算为准（不信客户端自报）。
+   */
+  private persistDocuments(sessionId: string, documents?: SessionDocumentInput[]): SessionDocumentRef[] {
+    if (!documents?.length) return []
+    const refs: SessionDocumentRef[] = []
+    for (const doc of documents) {
+      const base64 = doc.dataUrl.split(',')[1] ?? ''
+      if (!base64) continue
+      const bytes = Buffer.from(base64, 'base64').length
+      const mimeMatch = /^data:([^;,]+)/.exec(doc.dataUrl)
+      const mime = mimeMatch?.[1] ?? 'application/octet-stream'
+      const docId = randomId()
+      try {
+        this.persistence?.saveDocument?.(sessionId, docId, base64, doc.name)
+      } catch {
+        // non-fatal — 原文回读缺失不阻断元数据上事件
+      }
+      refs.push({ id: docId, name: doc.name, bytes, mime })
+    }
+    return refs
+  }
+
+  /** Read a persisted user document (for the GET document route). */
+  readDocument(sessionId: string, docId: string): { bytes: Buffer; mime: string; ext: string } | undefined {
+    return this.persistence?.readDocument?.(sessionId, docId)
+  }
+
   private touch(session: InternalSession): void {
     session.record.updatedAt = this.now()
     // updatedAt 决定列表排序；未配对 persistRecord 的触碰（队列 lane、委派、
@@ -6850,6 +7156,30 @@ function randomId(): string {
   // 可预测，若未来任一路由把「知道 id」当授权即成漏洞。长度与旧格式相近，
   // 保留日期前缀便于人工排查。
   return new Date().toISOString().slice(0, 10).replace(/-/g, '') + randomUUID().replace(/-/g, '').slice(0, 12)
+}
+
+/** issue #300 — 单次 run 的 PDF 页图上限（与用户附图共享 MAX_IMAGES 配额）。 */
+const PDF_PAGE_IMAGES_MAX = 3
+
+/** 把 PDF 附件（dataUrl）落临时文件后逐份渲染页图；总量封顶 maxTotal。
+ *  单份失败跳过其余继续——页图是增强通道，任何一份都不值得阻断 run。 */
+async function renderPdfPagesFromInputs(docs: SessionDocumentInput[], maxTotal: number): Promise<string[]> {
+  const out: string[] = []
+  const tmpBase = await mkdtemp(join(tmpdir(), 'rivet-pdfpages-in-'))
+  try {
+    for (const doc of docs) {
+      if (out.length >= maxTotal) break
+      const base64 = doc.dataUrl.split(',')[1] ?? ''
+      if (!base64) continue
+      const tmpPath = join(tmpBase, `src-${out.length}.pdf`)
+      await writeFile(tmpPath, Buffer.from(base64, 'base64'))
+      const pages = await renderPdfPageImages(tmpPath, { maxPages: maxTotal - out.length })
+      out.push(...pages)
+    }
+  } finally {
+    await rm(tmpBase, { recursive: true, force: true }).catch(() => {})
+  }
+  return out
 }
 
 /** Phase 2 — queue lane 条目归并进新 prompt 时 lane 部分的小节头。 */

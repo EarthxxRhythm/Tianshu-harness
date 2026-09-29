@@ -266,6 +266,20 @@ export class CronLock {
     return this.state?.status === 'acquired' || this.state?.status === 'stale_recovered'
   }
 
+  /**
+   * issue #290 — human-readable owner for write-denial messages.
+   * undefined = this process owns the lock (or has not contended yet).
+   */
+  ownerDescription(): string | undefined {
+    if (this.isOwner()) return undefined
+    const owner = (this.state?.status === 'contended' ? this.state.owner : undefined) ?? readLockFile(this.lockPath)
+    if (!owner) {
+      return '当前 sidecar 未持有调度器锁：定时任务写入由锁主进程受理，请在该实例的自动化面板操作，或稍后重试。'
+    }
+    const host = owner.hostname && owner.hostname !== this.getHostname() ? `，主机 ${owner.hostname}` : ''
+    return `当前 sidecar 未持有调度器锁：定时任务写入由锁主进程受理（锁主 PID ${owner.pid}${host}），请在该实例的自动化面板操作，或稍后重试。`
+  }
+
   // ─── Internal ──────────────────────────────────────────────
 
   private getHostname(): string {

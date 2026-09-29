@@ -106,6 +106,25 @@ test('queued message carries document text, prefixed before its own text (#238 �
   assert.ok(docIdx < textIdx, '文档块应排在该条排队文本之前')
 })
 
+test('issue #300：排队文档的引用随归并进入下轮 user 事件（卡片不随归并消失）', async () => {
+  const { router, agents, manager } = setup()
+  const id = await startBusySession(router)
+
+  const queued = await router('POST', `/sessions/${id}/queue`, { text: '排队带的文档', documents: [PDF_DOC] }, AUTH)
+  assert.equal(queued.status, 200)
+
+  agents[0]!.finish()
+  await settle()
+
+  assert.equal(agents[0]!.runs.length, 2, '收尾 flush 应起新 run 消费 lane')
+  const userEvents = manager.getEvents(id, 0)!.events.filter((e) => e.type === 'user')
+  const merged = userEvents[userEvents.length - 1]!
+  const docs = merged.data.documents as Array<{ id: string; name: string; bytes: number }> | undefined
+  assert.ok(docs && docs.length === 1, '归并后的 user 事件必须携带排队文档的引用')
+  assert.equal(docs![0]!.name, 'plan.pdf')
+  assert.ok(docs![0]!.bytes > 0)
+})
+
 test('queue rejects when lane image budget would be exceeded (#238 用例 3)', async () => {
   const { router } = setup()
   const id = await startBusySession(router)

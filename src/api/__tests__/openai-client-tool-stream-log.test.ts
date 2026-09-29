@@ -28,6 +28,9 @@ async function runFrames(frames: string[]): Promise<any[]> {
   const stream = new ReadableStream({
     start(controller) {
       for (const f of frames) controller.enqueue(encoder.encode(f))
+      // These cases exercise the successful final-flush path; the provider's
+      // terminal marker is required for a clean completion.
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'))
       controller.close()
     },
   })

@@ -31,7 +31,7 @@ import {
 import { open, readFile } from 'node:fs/promises'
 import { appendFile, mkdir, writeFile, rename } from 'node:fs/promises'
 import { setImmediate as yieldToLoop } from 'node:timers/promises'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
 import { cpuPool } from '../workers/cpu-pool.js'
 import { parseEventsJsonlRaw, parseEventsTailRaw } from '../workers/cpu-tasks.js'
 import type {
@@ -686,6 +686,33 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     return undefined
   }
 
+  /** 文档附件原文持久化（issue #300：卡片点击可预览/下载原文）。
+   *  与 images 同构：<id>/documents/<docId>.<ext>，ext 取原始文件名的扩展名
+   *  （白名单抽取集内），mime 由扩展名静态映射。 */
+  saveDocument(sessionId: string, docId: string, base64: string, fileName: string): void {
+    const d = join(this.ensureDir(sessionId), 'documents')
+    if (!existsSync(d)) mkdirSync(d, { recursive: true })
+    const ext = extname(fileName).toLowerCase().replace(/^\./, '')
+    const safeExt = DOC_EXT_MIME.has(ext) ? ext : 'bin'
+    writeFileSync(join(d, `${sanitize(docId)}.${safeExt}`), Buffer.from(base64, 'base64'))
+  }
+
+  readDocument(sessionId: string, docId: string): { bytes: Buffer; mime: string; ext: string } | undefined {
+    const dir = join(this.dir(sessionId), 'documents')
+    const safe = sanitize(docId)
+    for (const [ext, mime] of DOC_EXT_MIME) {
+      const file = join(dir, `${safe}.${ext}`)
+      if (existsSync(file)) {
+        try {
+          return { bytes: readFileSync(file), mime, ext }
+        } catch {
+          return undefined
+        }
+      }
+    }
+    return undefined
+  }
+
   loadAll(): PersistedSession[] {
     this.flushSync()
     if (!existsSync(this.baseDir)) return []
@@ -732,6 +759,17 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   loadEvents(id: string): SessionEvent[] {
     this.flushSession(id)
     return this.readEvents(this.dir(id))
+  }
+
+  /** 跨进程同步的漂移探针（issue #274）：纯 stat，不 flush 本进程缓冲——
+   *  未落盘的本进程事件下轮扫描自然可见，读侧不该反过来推写侧。 */
+  statEvents(sessionId: string): { size: number; mtimeMs: number } | undefined {
+    try {
+      const st = statSync(join(this.dir(sessionId), 'events.jsonl'))
+      return { size: st.size, mtimeMs: st.mtimeMs }
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -1421,3 +1459,18 @@ function extForMime(mime: string): string {
   const hit = EXT_MIME.find(([, m]) => m === mime)
   return hit ? hit[0] : 'png'
 }
+
+/** 可抽取文档的扩展名 ↔ MIME（与 doc-extract 的 EXTRACTABLE 对齐 + bin 兜底）。 */
+const DOC_EXT_MIME: ReadonlyMap<string, string> = new Map([
+  ['pdf', 'application/pdf'],
+  ['docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  ['doc', 'application/msword'],
+  ['rtf', 'application/rtf'],
+  ['odt', 'application/vnd.oasis.opendocument.text'],
+  ['pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ['odp', 'application/vnd.oasis.opendocument.presentation'],
+  ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  ['xls', 'application/vnd.ms-excel'],
+  ['ods', 'application/vnd.oasis.opendocument.spreadsheet'],
+  ['bin', 'application/octet-stream'],
+])

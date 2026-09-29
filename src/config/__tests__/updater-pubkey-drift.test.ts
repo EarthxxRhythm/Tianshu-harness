@@ -3,11 +3,12 @@
  *
  * 为什么值得一条守卫：key id 是排障时**唯一能对着用户报错核对的凭据**
  * （`The signature verification failed` 时，第一件事是确认用户端内嵌的 pubkey
- * 与线上 manifest 的签名私钥是不是一对）。2026-09-25 的密钥轮换把
- * `tauri.conf.json` 换成新 minisign 公钥（`94CFA603A032080C`），而
- * `docs/DESKTOP-RELEASE.md` 的「当前打包机配置」仍写着旧 id `198A2F01…`——
- * 配置改了、记录没改，两者都摆在「看起来权威」的位置上，下次排障就会按错的
- * id 去核对。把这条比对变成门禁，和 `license-keys-drift.test.ts` 同一思路。
+ * 与线上 manifest 的签名私钥是不是一对）。2026-09-25 一度准备把
+ * `tauri.conf.json` 轮换到新 minisign 公钥（`94CFA603A032080C`），
+ * `docs/DESKTOP-RELEASE.md` 也先写成了新 id；但最终决定继续使用旧 key
+ * `198A2F0156FAE921`。文档与配置出现「文档新、配置旧」的漂移，而实际
+ * 3.26.0 包和 `latest.json` 签名也都是旧 key。把比对变成门禁，和
+ * `license-keys-drift.test.ts` 同一思路。
  *
  * 公开仓快照里没有 `desktop/`，也没有这份私有发版文档（`docs/DESKTOP-RELEASE*`
  * 不在 sync 白名单），所以文件缺失时整组跳过，不把「本仓没有」误报成漂移红。
@@ -28,11 +29,13 @@ const skip = sourcesPresent
   : '本仓无 desktop/src-tauri 或 docs/DESKTOP-RELEASE.md（公开仓快照）——漂移守卫在开发仓生效'
 
 /**
- * 轮换前的 minisign 公钥（`198A2F0156FAE921`，2026-09-25 被换掉）。
- * 仅用于契约自检：证明下面那条断言能区分新旧，而不是形同虚设。
+ * 2026-09-25 一度准备轮换到、但最终没有采用的 key id。
+ * 只包装成 pubkey 注释形状，用于契约自检：证明漂移断言用的是配置里
+ * 实际解析出的 key id，而不是把任意 16 位十六进制字符串都放过。
  */
-const LEGACY_UPDATER_PUBKEY =
-  'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE5OEEyRjAxNTZGQUU5MjEKUldRaDZmcFdBUytLR2NGUVVzUmlWUE5yUHpJWUZ5QjV3SmptSmkzcjZLNEUvOHZRNDlkb1JTdlgK'
+const OTHER_KEY_ID_FIXTURE = Buffer.from(
+  'untrusted comment: minisign public key: 94CFA603A032080C\n',
+).toString('base64')
 
 /**
  * minisign pubkey 的 base64 里嵌着 `untrusted comment: minisign public key: <16 hex>`。
@@ -43,11 +46,6 @@ function updaterKeyId(pubkeyB64: string): string {
   const id = decoded.match(/minisign public key:\s*([0-9A-F]{16})/)?.[1]
   assert.ok(id !== undefined, `pubkey 解不出 key id（形态已变？）：${decoded.slice(0, 120)}`)
   return id
-}
-
-/** 该公钥的 key id 是否被发版文档记录。抽成纯函数，便于用旧公钥做契约自检。 */
-function keyIdRecordedInDoc(pubkeyB64: string, doc: string): boolean {
-  return doc.includes(updaterKeyId(pubkeyB64))
 }
 
 function currentUpdaterPubkey(): string {
@@ -72,20 +70,13 @@ describe('updater 公钥漂移守卫（tauri.conf.json ⇄ 发版文档）', { s
     )
   })
 
-  it('契约自检：旧公钥的 key id 不会被这条断言放过', () => {
+  it('契约自检：文档写进另一个 key id 时守卫会红', () => {
     const current = updaterKeyId(currentUpdaterPubkey())
-    const legacy = updaterKeyId(LEGACY_UPDATER_PUBKEY)
-    assert.notEqual(legacy, current, '新公钥与旧公钥解出同一个 key id——解析逻辑错了')
+    const other = updaterKeyId(OTHER_KEY_ID_FIXTURE)
+    assert.equal(current, '198A2F0156FAE921', '当前 3.26.0 构建配置应继续使用旧 key')
+    assert.notEqual(other, current, '新旧 key id 解析成了同一个——解析逻辑错了')
     const doc = readFileSync(RELEASE_DOC, 'utf8')
-    assert.equal(
-      keyIdRecordedInDoc(currentUpdaterPubkey(), doc),
-      true,
-      '当前公钥的 id 应在文档里'
-    )
-    assert.equal(
-      keyIdRecordedInDoc(LEGACY_UPDATER_PUBKEY, doc),
-      false,
-      '旧公钥的 id 仍在文档里被当成「当前」记录——配置回退到旧公钥时这条守卫就抓不住了'
-    )
+    assert.equal(doc.includes(current), true, '当前 key id 应在文档里')
+    assert.equal(doc.includes(other), false, '未采用的 94CFA key id 不应被文档写成当前配置')
   })
 })

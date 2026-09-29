@@ -312,7 +312,16 @@ async function fetchModelList(options: ProbeOptions, errors: string[]): Promise<
     const payload = await response.json() as unknown
     const ids = parseModelIds(payload)
     if (ids.length === 0) errors.push('GET /models returned no usable model ids.')
-    return { ids }
+    const infos: Record<string, ProbedModelInfo> = {}
+    const entries = (payload as { data?: unknown })?.data
+    if (Array.isArray(entries)) for (const entry of entries) {
+      if (!entry || typeof entry.id !== 'string') continue
+      const info: ProbedModelInfo = {}
+      if (Number.isSafeInteger(entry.context_window) && entry.context_window > 0) info.contextWindow = entry.context_window
+      if (Number.isSafeInteger(entry.max_output_tokens) && entry.max_output_tokens > 0) info.maxOutputTokens = entry.max_output_tokens
+      if (Object.keys(info).length) infos[entry.id] = info
+    }
+    return { ids, ...(Object.keys(infos).length ? { infos } : {}) }
   } catch (error) {
     const reason = error instanceof Error && error.name === 'AbortError'
       ? `timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`

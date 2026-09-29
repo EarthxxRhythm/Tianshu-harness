@@ -35,7 +35,7 @@ describe('probeProvider', () => {
     server = await startServer((req, res) => {
       if (req.url === '/v1/models') {
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ data: [{ id: 'my-model' }, { id: 'other-model' }] }))
+        res.end(JSON.stringify({ data: [{ id: 'my-model', context_window: 1_048_576, max_output_tokens: 393_216 }, { id: 'other-model', context_window: -1, max_output_tokens: 'invalid' }] }))
         return
       }
       if (req.url === '/v1/chat/completions') {
@@ -51,6 +51,7 @@ describe('probeProvider', () => {
 
     const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'sk-test' })
     assert.deepEqual(report.models, ['my-model', 'other-model'])
+    assert.deepEqual(report.modelInfos, { 'my-model': { contextWindow: 1_048_576, maxOutputTokens: 393_216 } })
     assert.equal(report.modelsOk, true)
     assert.equal(report.completionOk, true)
     assert.equal(report.hints.reasoningSplit, true)

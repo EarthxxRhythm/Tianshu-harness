@@ -9,7 +9,13 @@
  */
 
 export interface FrozenSnapshotData {
-  v: 1
+  v: 1 | 2
+  userKeys?: string[]
+  anchors?: import('./frozen-anchors.js').FrozenAnchor[]
+  /** sha256 of the stable frozen volatile block at export time. A resume in the
+   *  same cwd/config must match and may reuse the active boundary bytes; a
+   *  mismatch means the config changed and the active boundary must rebuild. */
+  frozenBaseHash?: string
   frozenUserMerged: Array<[string, string[]]>
   frozenPendingMerged: Array<[string, string]>
   firstUserKey: string | null
@@ -21,9 +27,18 @@ export interface FrozenSnapshotData {
 export function parseFrozenSnapshotData(raw: unknown): FrozenSnapshotData | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined
   const d = raw as Record<string, unknown>
-  if (d['v'] !== 1) return undefined
+  if (d['v'] !== 1 && d['v'] !== 2) return undefined
+  if (d.userKeys !== undefined && (!Array.isArray(d.userKeys) || !d.userKeys.every(k => typeof k === 'string' && /^[a-f0-9]{64}:\d+$/.test(k)))) return undefined
+  if (d.frozenBaseHash !== undefined && (typeof d.frozenBaseHash !== 'string' || !/^[a-f0-9]{64}$/.test(d.frozenBaseHash))) return undefined
+  if (d['v'] === 2 && (!Array.isArray(d.anchors) || !d.anchors.every(a =>
+    a && typeof a.key === 'string' && /^[a-f0-9]{64}:\d+$/.test(a.key)
+    && (a.type === 'text' || a.type === 'parts') && typeof a.prefix === 'string'
+    && typeof a.suffix === 'string' && (a.legacyText === undefined || typeof a.legacyText === 'string')))) return undefined
   if (!Array.isArray(d['frozenUserMerged']) || !Array.isArray(d['frozenPendingMerged'])) return undefined
-  if (typeof d['collapseWatermark'] !== 'number' || typeof d['collapseTokenStep'] !== 'number') return undefined
+  if (!d.frozenUserMerged.every(x => Array.isArray(x) && x.length === 2 && typeof x[0] === 'string'
+    && Array.isArray(x[1]) && x[1].every((v: unknown) => typeof v === 'string'))) return undefined
+  if (!d.frozenPendingMerged.every(x => Array.isArray(x) && x.length === 2 && x.every(v => typeof v === 'string'))) return undefined
+  if (typeof d['collapseWatermark'] !== 'number' || typeof d['collapseTokenStep'] !== 'number' || !Number.isFinite(d.collapseWatermark) || !Number.isFinite(d.collapseTokenStep)) return undefined
   if (d['firstUserKey'] !== null && typeof d['firstUserKey'] !== 'string') return undefined
   return raw as FrozenSnapshotData
 }

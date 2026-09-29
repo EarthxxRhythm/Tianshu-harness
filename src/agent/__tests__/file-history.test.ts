@@ -109,6 +109,99 @@ describe('FileHistory', () => {
     assert.equal(existsSync(created), false)
   })
 
+  it('rewindToBoundary skips a file claimed by another session and reports it', async () => {
+    const own = join(TMP, 'own.txt')
+    const peer = join(TMP, 'peer.txt')
+    writeFileSync(own, 'own@boundary')
+    writeFileSync(peer, 'peer@boundary')
+    await history.trackEdit(own, 'edit_1')
+    writeFileSync(own, 'own-new')
+    await history.trackEdit(peer, 'edit_2')
+    writeFileSync(peer, 'peer-in-flight')
+
+    const changed = await history.rewindToBoundary(new Set(['edit_1', 'edit_2']), {
+      blockerOf: (filePath: string) =>
+        filePath === peer ? { sessionId: 'session-B', claimType: 'exclusive' } : null,
+    })
+
+    // Historical array contract stays intact (deep-equal), report is attached.
+    assert.deepEqual(changed, [own])
+    assert.deepEqual(changed.filesChanged, [own])
+    assert.deepEqual(changed.skipped, [peer])
+    assert.deepEqual(changed.skippedBy, [{ path: peer, sessionId: 'session-B', claimType: 'exclusive' }])
+    assert.equal(readFileSync(own, 'utf-8'), 'own@boundary', 'unclaimed file restored')
+    assert.equal(readFileSync(peer, 'utf-8'), 'peer-in-flight', 'peer file must not be touched')
+  })
+
+  it('rewindToBoundary does not delete a claimed file first created after the boundary', async () => {
+    const peerCreated = join(TMP, 'peer-created.txt')
+    await history.trackEdit(peerCreated, 'edit_1') // null backup = did not exist at boundary
+    writeFileSync(peerCreated, 'peer is editing it')
+
+    const changed = await history.rewindToBoundary(new Set(['edit_1']), (filePath) => filePath === peerCreated)
+
+    assert.deepEqual(changed, [])
+    assert.deepEqual(changed.skipped, [peerCreated])
+    assert.equal(existsSync(peerCreated), true, 'delete branch is guarded too (no data-loss side door)')
+    assert.equal(readFileSync(peerCreated, 'utf-8'), 'peer is editing it')
+  })
+
+  it('rewind (undo) skips a claimed file and reports it', async () => {
+    const own = join(TMP, 'undo-own.txt')
+    const peer = join(TMP, 'undo-peer.txt')
+    writeFileSync(own, 'v1')
+    writeFileSync(peer, 'v1')
+    await history.trackEdit(own, 'msg_1')
+    await history.trackEdit(peer, 'msg_1')
+    writeFileSync(own, 'v2')
+    writeFileSync(peer, 'peer-v2')
+
+    const changed = await history.rewind('msg_1', {
+      isOwnedByOther: (filePath: string) => filePath === peer,
+    })
+
+    assert.deepEqual(changed, [own])
+    assert.deepEqual(changed.skipped, [peer])
+    assert.equal(readFileSync(own, 'utf-8'), 'v1')
+    assert.equal(readFileSync(peer, 'utf-8'), 'peer-v2')
+  })
+
+  it('getBoundaryFiles marks a peer-claimed file as blocked instead of restore/delete', async () => {
+    const own = join(TMP, 'preview-own.txt')
+    const peer = join(TMP, 'preview-peer.txt')
+    writeFileSync(own, 'orig')
+    writeFileSync(peer, 'orig')
+    await history.trackEdit(own, 'edit_1')
+    await history.trackEdit(peer, 'edit_2')
+
+    const files = history.getBoundaryFiles(new Set(['edit_1', 'edit_2']), {
+      blockerOf: (filePath: string) =>
+        filePath === peer ? { sessionId: 'session-B', claimType: 'exclusive' } : null,
+    })
+
+    const byPath = new Map(files.map(f => [f.path, f]))
+    assert.equal(byPath.get(peer)?.action, 'blocked')
+    assert.equal(byPath.get(peer)?.blockedBy, 'session-B')
+    assert.equal(byPath.get(own)?.action, 'restore')
+  })
+
+  it('accepts an options wrapper with a raw registry and workspace context', async () => {
+    const peer = join(TMP, 'peer-options.txt')
+    writeFileSync(peer, 'orig')
+    await history.trackEdit(peer, 'edit_1')
+
+    const files = history.getBoundaryFiles(new Set(['edit_1']), {
+      registry: {
+        checkClaim: (filePath: string) =>
+          filePath.endsWith('peer-options.txt') ? { sessionId: 'session-B', claimType: 'exclusive' } : null,
+      },
+      cwd: TMP,
+      sessionId: 'test-session',
+    })
+
+    assert.deepEqual(files, [{ path: peer, action: 'blocked', blockedBy: 'session-B' }])
+  })
+
   it('rewind skips files whose backup read failed while the path existed (no unlink)', async () => {
     // 跨平台的「存在但读不了」触发：trackEdit 时路径是目录（readFile EISDIR），
     // 与 Windows AV/EDR 锁、EBUSY 同属「备份没拿到 ≠ 文件当时不存在」。

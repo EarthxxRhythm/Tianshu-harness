@@ -25,6 +25,9 @@ export type FailureClass =
    *  调用没有执行是**预期行为**，不是工具损坏或模型能力问题。retryable=false，
    *  vigor 减罚，免疫/收敛不放大（见 tool-history-recorder 的豁免）。 */
   | 'refused'
+  /** git apply 拒绝补丁：diff 格式损坏（hunk 头计数错误）、上下文漂移、
+   *  或目标文件不在索引。原样重发必然再失败，retryable=false。 */
+  | 'patch_rejected'
 
 export interface ClassifiedFailure {
   class: FailureClass
@@ -93,6 +96,7 @@ const CANONICAL: Record<FailureClass, { suggestion: string; retryable: boolean }
   test_red: { suggestion: 'TDD RED — 这是预期中的测试红灯，实现代码后应转绿。', retryable: false },
   probe_miss: { suggestion: '探测确认路径不存在——这本身是有效信息，记录结论即可，不要重试同一路径。', retryable: false },
   refused: { suggestion: '调用被设计性拒绝（目标不允许或协议不支持）。不要重复同一调用；改用允许的目标，或按提示修改配置。', retryable: false },
+  patch_rejected: { suggestion: '补丁被 git apply 拒绝。先 read_file 读取目标当前内容，核对 hunk 头计数后重新生成 diff——勿原样重发同一补丁。', retryable: false },
 }
 
 /** 从 ToolResult 的结构字段解析失败类别：errorKind 直读；
@@ -145,6 +149,13 @@ export function classifyFailure(
   // 顺序放在 timeout/network 之前，避免"已拦截……请设置……"里的词被误分类。
   if (/已拦截|不支持的协议|不是回环地址且不在许可名单/.test(errorText)) {
     return { class: 'refused', suggestion: '调用被设计性拒绝（目标不允许或协议不支持）。不要重复同一调用；改用允许的目标，或按提示修改配置。', confidence: 0.9, retryable: false }
+  }
+
+  // 0.6 git apply 拒绝（apply_patch 的结构通道是 errorKind，这里兜 bash 手跑
+  // git apply 的文本路径）。放在 type_error 之前：短语足够特异，且 git 输出
+  // 不会与 TS 错误共存于同一文本。
+  if (/corrupt patch at|patch does not apply|does not exist in index|does not match index|error: patch failed/i.test(errorText)) {
+    return { class: 'patch_rejected', suggestion: '补丁被 git apply 拒绝。先 read_file 读取目标当前内容，核对 hunk 头计数后重新生成 diff——勿原样重发同一补丁。', confidence: 0.85, retryable: false }
   }
 
   // 1. TypeScript type errors

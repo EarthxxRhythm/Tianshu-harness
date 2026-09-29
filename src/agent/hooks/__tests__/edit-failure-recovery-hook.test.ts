@@ -102,4 +102,52 @@ describe('createEditFailureRecoveryHook', () => {
     assert.equal(submitted.length, 2)
     assert.ok(submitted[1]!.content.includes('3'))
   })
+
+  const PATCH_DIFF = 'diff --git a/src/foo.ts b/src/foo.ts\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1 +1 @@\n-old\n+new\n'
+
+  function makePatchTool(success: boolean): RuntimeToolEvent {
+    return {
+      name: 'apply_patch',
+      success,
+      isError: !success,
+      input: { diff: PATCH_DIFF },
+    } as unknown as RuntimeToolEvent
+  }
+
+  it('apply_patch：第二次失败触发补丁专用建议（不再推荐 apply_patch 自己）', () => {
+    const submitted: AdvisoryEntry[] = []
+    const hook = createEditFailureRecoveryHook({
+      advisoryBus: { submit: (e: AdvisoryEntry) => { submitted.push(e) } },
+    })
+    hook.run(makeCtx(1), makePatchTool(false))
+    assert.equal(submitted.length, 0)
+    hook.run(makeCtx(1), makePatchTool(false))
+    assert.equal(submitted.length, 1)
+    assert.equal(submitted[0]!.key, 'edit-failure-recovery:src/foo.ts')
+    assert.match(submitted[0]!.content, /read_file/)
+    assert.match(submitted[0]!.content, /edit_file/)
+    assert.doesNotMatch(submitted[0]!.content, /改用 apply_patch/)
+  })
+
+  it('apply_patch：成功后重置计数', () => {
+    const submitted: AdvisoryEntry[] = []
+    const hook = createEditFailureRecoveryHook({
+      advisoryBus: { submit: (e: AdvisoryEntry) => { submitted.push(e) } },
+    })
+    hook.run(makeCtx(1), makePatchTool(false))
+    hook.run(makeCtx(1), makePatchTool(true))
+    hook.run(makeCtx(1), makePatchTool(false))
+    assert.equal(submitted.length, 0)
+  })
+
+  it('apply_patch：无 diff 输入时忽略', () => {
+    const submitted: AdvisoryEntry[] = []
+    const hook = createEditFailureRecoveryHook({
+      advisoryBus: { submit: (e: AdvisoryEntry) => { submitted.push(e) } },
+    })
+    const empty = { name: 'apply_patch', success: false, isError: true, input: {} } as unknown as RuntimeToolEvent
+    hook.run(makeCtx(1), empty)
+    hook.run(makeCtx(1), empty)
+    assert.equal(submitted.length, 0)
+  })
 })

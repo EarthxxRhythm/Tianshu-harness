@@ -940,11 +940,12 @@ async function main() {
         ? cacheRead / 1_000_000 * Math.max(0, (pricing.input ?? 0) - (pricing.cacheRead ?? pricing.input ?? 0))
         : null
       return {
-        hitRate: ctx.session.getRecentTurnHitRate(3) ?? ctx.session.getCacheHitRate(),
+        hitRate: total.cacheCoverage?.unknown && !total.cacheCoverage.observed ? null : ctx.session.getCacheHitRate() * 100,
         input: total.input_tokens,
         output: total.output_tokens,
         cacheRead,
         cacheCreate: total.cache_creation_input_tokens ?? 0,
+        cacheCreateUnreported: (total.cacheCoverage?.creationUnknown ?? 0) > 0,
         cost: pricing ? computeUsageCost(total, pricing).total : null,
         savings,
       }
@@ -1402,7 +1403,13 @@ async function main() {
       if (fh) {
         const ids = collectPostBoundaryEditIds(messages, messageIndex)
         fh.rewindToBoundary(ids).then(
-          changed => tuiApp.commitStatic(`⏪ 已把 ${changed.length} 个文件恢复到此消息${changed.length ? '' : '（无可恢复的编辑）'}`),
+          changed => {
+            const skipped = changed.skipped
+            const skippedNote = skipped.length > 0
+              ? `；跳过 ${skipped.length} 个被其他会话编辑中的文件（${skipped.slice(0, 3).join('、')}${skipped.length > 3 ? '…' : ''}）`
+              : ''
+            tuiApp.commitStatic(`⏪ 已把 ${changed.length} 个文件恢复到此消息${changed.length ? '' : '（无可恢复的编辑）'}${skippedNote}`)
+          },
           err => tuiApp.commitStatic(`回滚代码失败：${(err as Error).message}`),
         )
       } else {

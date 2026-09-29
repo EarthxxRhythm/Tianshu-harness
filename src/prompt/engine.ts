@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto'
+import { assertCompleteAttachments } from '../api/attachment-integrity.js'
+import { FrozenAnchors } from './frozen-anchors.js'
 import type { OaiChatRequest, OaiContentPart, OaiMessage, OaiToolDefinition } from '../api/oai-types.js'
 import { pruneOutdatedQueryResults } from '../compact/semantic-prune.js'
 import { collapseToolResult } from '../compact/context-collapse.js'
@@ -63,6 +66,9 @@ const FULL_COLLAPSE_FILL_RATIO = 0.85
  */
 const COLLAPSE_FLOOR_FILL_RATIO = 0.5
 
+/** Stable fingerprint of the frozen volatile prefix (diagnostics/restore only; never prompt bytes). */
+function frozenBaseHash(block: string): string { return createHash('sha256').update(block).digest('hex') }
+
 /** Fast non-crypto hash for content dedup (djb2 on first 2000 chars + length). */
 function simpleHash(s: string): string {
   let h = 5381
@@ -94,6 +100,7 @@ export interface PrefixDivergence {
 }
 
 export interface PromptEngineConfig {
+  requestBudgetPolicy?: import('../context/request-budget.js').RequestBudgetPolicy
   model: string
   maxTokens: number
   staticCtx: StaticPromptContext
@@ -118,6 +125,9 @@ export interface PromptEngineConfig {
 }
 
 export class PromptEngine {
+  getRequestBudgetPolicy(): import('../context/request-budget.js').RequestBudgetPolicy | undefined {
+    return this.config.requestBudgetPolicy
+  }
   private systemPrompt: string
   private volatileBlock: string
   private frozenBase: string
@@ -152,13 +162,27 @@ export class PromptEngine {
    * Intra-turn appendix revisions live in frozenPendingMerged until the next
    * real user boundary — never pushed into this array per tool turn.
    */
+  private anchors = new FrozenAnchors()
+  private anchorHistory: string[] = []
+  private checkInheritedHistory = false
+  private pruneAnchorsOnBuild = false
+  private onFrozenChanged?: () => void
+  private refreshInheritedActive = false
+  private inheritedActiveBase?: { hash?: string; prefix?: string }
+  /**
+   * Explicit invalidation (config/session-memory/history rewrite) forces the
+   * CURRENT last user boundary to be rebuilt on the next main build instead of
+   * reusing its frozen anchor. A genuinely new user message needs no flag: its
+   * occurrence key has no anchor yet.
+   */
+  private rebuildActiveAnchor = false
+  private frozenRestoreReason: string | undefined
   private frozenUserMerged: Map<string, string[]> = new Map()
   /** Latest merged trailer for the active last-user message (pre-commit). */
   private frozenPendingMerged: Map<string, string> = new Map()
   /** Per-content fetch index — tracks which entry to retrieve next per content key. */
   private frozenFetchIndex: Map<string, number> = new Map()
   /** Maximum total entries across all content keys before eviction kicks in. */
-  private static readonly MAX_FROZEN_USER_MERGED = 64
   /**
    * Content key of the FIRST user message in the current session. Its frozen
    * snapshot is the byte-0 anchor of the whole prefix — if eviction deletes it,
@@ -279,7 +303,12 @@ export class PromptEngine {
     // state BEFORE any build, so historical slots resolve to the old bytes.
     // resume 走同一入口：盘存 FrozenSnapshotData（<id>.frozen.json）与活引擎同语义。
     const inherit = config.inheritFrozenFrom
+    const initialFrozenBase = buildStableVolatileBlock(config.volatileCtx)
     if (inherit instanceof PromptEngine) {
+      this.anchors = new FrozenAnchors(inherit.anchors.export())
+      this.anchorHistory = [...inherit.anchorHistory]
+      this.checkInheritedHistory = true
+      this.inheritedActiveBase = inherit.inheritedActiveBase ?? { hash: frozenBaseHash(inherit.volatileBlock) }
       this.frozenUserMerged = new Map([...inherit.frozenUserMerged].map(([k, v]) => [k, [...v]]))
       this.frozenPendingMerged = new Map(inherit.frozenPendingMerged)
       this.firstUserKey = inherit.firstUserKey
@@ -288,6 +317,13 @@ export class PromptEngine {
     } else {
       const data = inherit ? parseFrozenSnapshotData(inherit) : undefined
       if (data) {
+        this.anchors = new FrozenAnchors(data.anchors)
+        this.anchorHistory = data.userKeys ?? []
+        this.checkInheritedHistory = true
+        const activeAnchorKey = this.anchorHistory.at(-1)
+        this.inheritedActiveBase = { hash: data.frozenBaseHash,
+          prefix: activeAnchorKey ? this.anchors.prefixOf(activeAnchorKey) : undefined }
+        this.frozenRestoreReason = data.v === 1 ? 'legacy_snapshot' : undefined
         // 深拷贝——盘存数据可能被调用方复用/再写，不得共享引用。
         this.frozenUserMerged = new Map(data.frozenUserMerged.map(([k, v]) => [k, [...v]]))
         this.frozenPendingMerged = new Map(data.frozenPendingMerged)
@@ -298,7 +334,7 @@ export class PromptEngine {
     }
     this.approvalMode = config.approvalMode
     this.systemPrompt = buildSystemPrompt(config.staticCtx)
-    this.frozenBase = buildStableVolatileBlock(config.volatileCtx)
+    this.frozenBase = initialFrozenBase
     this.volatileBlock = this.frozenBase
     this.fingerprint = computeFingerprint(this.systemPrompt, config.staticCtx.tools, this.volatileBlock)
     this.tracker = (config.habituationThreshold ?? 5) > 0
@@ -412,7 +448,10 @@ export class PromptEngine {
    */
   exportFrozenSnapshot(): FrozenSnapshotData {
     return {
-      v: 1,
+      v: 2,
+      anchors: this.anchors.export(),
+      userKeys: [...this.anchorHistory],
+      frozenBaseHash: this.inheritedActiveBase ? this.inheritedActiveBase.hash : frozenBaseHash(this.volatileBlock),
       frozenUserMerged: [...this.frozenUserMerged].map(([k, v]) => [k, [...v]] as [string, string[]]),
       frozenPendingMerged: [...this.frozenPendingMerged],
       firstUserKey: this.firstUserKey,
@@ -435,7 +474,36 @@ export class PromptEngine {
     // T7 watermark) makes the NEXT main-turn request rebuild its last user
     // message with different bytes → prefix break at that position. Found by
     // the prefix-divergence probe, 2026-07-05.
+    assertCompleteAttachments(inputMessages)
     const sidePath = options?.sidePath === true
+    const anchorRevision = this.anchors.revision
+    /** Last-user occurrence key from the previous main build — the only boundary
+     *  whose anchor is known to describe the CURRENT execution turn. */
+    let previousActiveAnchorKey: string | undefined
+    if (!sidePath) {
+      // Domain/session context is assembled after construction. Compare only
+      // now, against the applied inherited prefix, never a pending next boundary.
+      if (this.inheritedActiveBase) {
+        const { hash, prefix } = this.inheritedActiveBase
+        this.refreshInheritedActive = hash !== undefined ? hash !== frozenBaseHash(this.frozenBase)
+          : !(this.frozenBase.length > 0 && prefix?.startsWith(this.frozenBase))
+        if (!this.refreshInheritedActive) this.volatileBlock = this.frozenBase
+        this.inheritedActiveBase = undefined
+      }
+      const counts = new Map<string, number>()
+      const keys = inputMessages.filter(m => m.role === 'user' && !isSystemReminder(m.content)).map(m => FrozenAnchors.key(m, counts))
+      previousActiveAnchorKey = this.anchorHistory.at(-1)
+      if ((this.pruneAnchorsOnBuild || this.checkInheritedHistory) && this.anchorHistory.length
+        && (keys.length < this.anchorHistory.length || this.anchorHistory.some((key, i) => keys[i] !== key))) {
+        // A replaced history can renumber identical messages. Rebuild once instead of borrowing another occurrence's appendix.
+        this.anchors.retain(new Set())
+        this.frozenUserMerged.clear()
+        this.frozenPendingMerged.clear()
+        this.frozenRestoreReason = 'history_replaced'
+      }
+      this.checkInheritedHistory = false
+      this.anchorHistory = keys
+    }
     const result: OaiMessage[] = []
     // Reset per-call fetch index — each call re-fetches frozen entries in order.
     this.frozenFetchIndex.clear()
@@ -537,8 +605,27 @@ export class PromptEngine {
       }
     }
 
+    const occurrences = new Map<string, number>()
+    const liveAnchors = new Set<string>()
     for (let i = 0; i < oaiMessages.length; i++) {
       const msg = oaiMessages[i]!
+      const anchorKey = msg.role === 'user' && !isSystemReminder(msg.content) ? FrozenAnchors.key(msg, occurrences) : undefined
+      if (anchorKey) liveAnchors.add(anchorKey)
+      // The active last-user anchor may be rendered directly (instead of
+      // rebuilding FRESH) only when it still belongs to the CURRENT execution
+      // boundary: its occurrence key must equal the last-user key from the
+      // previous main build. A new user message, a duplicate append, or a
+      // rebuilt/replaced history all change that key and therefore fall through
+      // to the normal boundary path. Explicit invalidation flags force the same
+      // rebuild even when the key still matches (config / cwd / history rewrite).
+      const activeBoundaryMatches = i === lastUserIdx && anchorKey !== undefined && anchorKey === previousActiveAnchorKey
+      const staleActiveAnchor = i === lastUserIdx
+        && (this.refreshInheritedActive || this.rebuildActiveAnchor || !activeBoundaryMatches)
+      if (!sidePath && anchorKey && staleActiveAnchor) this.anchors.forget(anchorKey)
+      const anchored = anchorKey && !staleActiveAnchor ? this.anchors.render(anchorKey, msg) : undefined
+      if (!sidePath && anchored !== undefined) {
+        result.push({ role: 'user', content: anchored }); continue
+      }
       if (msg.role === 'user' && isSystemReminder(msg.content)) {
         // Pass through untouched: bare user message, byte-stable forever.
         result.push(msg)
@@ -646,10 +733,10 @@ export class PromptEngine {
           // Frozen snapshot captures the full content (including appendix),
           // so historical retrieval returns byte-identical content → cache hit.
           const trailered = this.buildTraileredUserContent(msg, this.cachedAppendix || undefined)
+          if (anchorKey) this.anchors.remember(anchorKey, msg, this.trailerTextPrefix(), this.cachedAppendix, undefined, true)
           // Track latest merged bytes for this last-user message; commit once at
           // the next real user boundary (not per tool turn / pseudo-boundary).
-          // 多模态消息（parts 数组）不入 frozen 快照——快照只存字符串形态；parts 是
-          // 稳定输入，重建字节不变，前缀缓存照常命中。
+          // v2 anchors retain multimodal injection bytes; this map serves v1 compatibility only.
           if (typeof msg.content === 'string') {
             this.frozenPendingMerged.set(msg.content, trailered as string)
           }
@@ -658,6 +745,7 @@ export class PromptEngine {
           // Use frozen merged content if available (preserves prefix from when this was lastUserIdx)
           const frozen = this.getNextFrozen(typeof msg.content === 'string' ? msg.content : '')
           if (frozen) {
+            if (!sidePath && anchorKey) this.anchors.remember(anchorKey, msg, '', '', frozen)
             result.push({ role: 'user', content: frozen })
           } else {
             // Fallback: trailer-merge volatileBlock to keep message count stable.
@@ -666,13 +754,14 @@ export class PromptEngine {
             // This path only fires when the key's snapshot array was fully
             // evicted — if volatileBlock has swapped since, the FIRST user
             // message changes from byte 0 → fatal 0% prefix break. Log it.
+            this.frozenRestoreReason ??= 'missing_anchor'
             this.frozenFallbackRebuilds++
-            debugLog('prompt-engine', `FATAL-CACHE: frozen snapshots fully evicted for FIRST user message (len=${typeof msg.content === 'string' ? msg.content.length : 0}) — rebuilding with current volatileBlock`)
+            debugLog('prompt-engine', `frozen anchor unavailable for FIRST user message (len=${typeof msg.content === 'string' ? msg.content.length : 0}) — rebuilding with current volatileBlock`)
             const rebuilt = this.buildTraileredUserContent(msg)
+            if (!sidePath && anchorKey) this.anchors.remember(anchorKey, msg, this.trailerTextPrefix(), '')
             // Memoize (self-heal): without this, every subsequent request
             // re-runs the fallback with live volatile bytes — flip-flopping
             // message bytes and paying cacheCreate tax on each request.
-            // 多模态消息不入快照（快照只存字符串形态）——parts 稳定，重建字节一致。
             if (!sidePath && typeof msg.content === 'string' && msg.content !== '') {
               this.frozenUserMerged.set(msg.content, [rebuilt as string])
             }
@@ -683,16 +772,18 @@ export class PromptEngine {
           // to preserve prefix stability (avoids content change when msg loses "last" status)
           const frozen = this.getNextFrozen(typeof msg.content === 'string' ? msg.content : '')
           if (frozen) {
+            if (!sidePath && anchorKey) this.anchors.remember(anchorKey, msg, '', '', frozen)
             result.push({ role: 'user', content: frozen })
           } else {
             // Fallback: inject volatileBlock so the message still carries context.
             // Loses dynamic appendix vs frozen snapshot, causing one cache miss but
             // doesn't cascade (message count unchanged).
+            this.frozenRestoreReason ??= 'missing_anchor'
             this.frozenFallbackRebuilds++
-            debugLog('prompt-engine', `frozen snapshots fully evicted for historical user message (len=${typeof msg.content === 'string' ? msg.content.length : 0}) — rebuilding with current volatileBlock`)
+            debugLog('prompt-engine', `frozen anchor unavailable for historical user message (len=${typeof msg.content === 'string' ? msg.content.length : 0}) — rebuilding with current volatileBlock`)
             const rebuilt = this.buildTraileredUserContent(msg)
+            if (!sidePath && anchorKey) this.anchors.remember(anchorKey, msg, this.trailerTextPrefix(), '')
             // Memoize (self-heal) — same rationale as the first-user fallback.
-            // 多模态消息不入快照（快照只存字符串形态）——parts 稳定，重建字节一致。
             if (!sidePath && typeof msg.content === 'string' && msg.content !== '') {
               this.frozenUserMerged.set(msg.content, [rebuilt as string])
             }
@@ -791,28 +882,12 @@ export class PromptEngine {
       }
     }
 
-    // Evict oldest frozen entries when total count exceeds limit.
-    // Each content key stores an array of snapshots (for duplicate messages).
-    // Total count = sum of all array lengths. Evict by removing oldest entries
-    // from the longest arrays first.
-    let totalFrozen = 0
-    for (const arr of this.frozenUserMerged.values()) totalFrozen += arr.length
-    while (totalFrozen > PromptEngine.MAX_FROZEN_USER_MERGED && this.frozenUserMerged.size > 0) {
-      let maxKey = '', maxLen = 0
-      for (const [k, arr] of this.frozenUserMerged) {
-        // Never evict the first user message's snapshot — it's the byte-0
-        // prefix anchor; losing it forces a full 0% cache rebuild.
-        if (k === this.firstUserKey) continue
-        if (arr.length > maxLen) { maxKey = k; maxLen = arr.length }
-      }
-      // Only the protected first-user key remains — stop rather than break it.
-      if (maxLen === 0) break
-      if (maxLen <= 1) {
-        this.frozenUserMerged.delete(maxKey)
-      } else {
-        this.frozenUserMerged.get(maxKey)!.shift()
-      }
-      totalFrozen--
+    // Only retire anchors absent from the authoritative main history.
+    if (!sidePath && this.pruneAnchorsOnBuild) {
+      this.pruneAnchorsOnBuild = false
+      this.anchors.retain(liveAnchors)
+      const liveText = new Set(oaiMessages.filter(m => m.role === 'user').map(m => typeof m.content === 'string' ? m.content : ''))
+      for (const key of this.frozenUserMerged.keys()) if (!liveText.has(key)) this.frozenUserMerged.delete(key)
     }
 
     // T7: Cache-Safe Context Collapse for 1M+ windows.
@@ -821,7 +896,7 @@ export class PromptEngine {
     // Gated at 50% window usage, with a watermark boundary that only advances
     // when crossing a 50K-token step — so the break happens once per step,
     // not on every turn (rolling break would defeat the prefix cache).
-    if (contextWindow && contextWindow >= 200_000 && !sidePath) {
+    if (contextWindow && contextWindow >= 200_000 && !sidePath && !this.config.requestBudgetPolicy) {
       const collapseAge = this.config.attentionProfile?.collapseAgeTurns ?? 8
       // Use the same CJK-aware accounting as the session layer
       // (estimateOaiMessageTokens: cjk/1.2, ascii/4, plus tool_calls and the
@@ -883,6 +958,11 @@ export class PromptEngine {
     // arrays — recording them would poison the main-turn baseline and report
     // phantom divergences.
     if (!sidePath) this.recordPrefixDivergence(request.messages)
+    if (!sidePath && this.anchors.revision !== anchorRevision) { try { this.onFrozenChanged?.() } catch { /* diagnostic persistence cannot break a request */ } }
+    if (!sidePath) {
+      this.refreshInheritedActive = false
+      this.rebuildActiveAnchor = false
+    }
     return request
   }
 
@@ -991,6 +1071,14 @@ export class PromptEngine {
   /** Current cognitive projection length in chars (for cache-log observability). */
   getCognitiveProjectionLength(): number {
     return this.cognitiveProjection?.length ?? 0
+  }
+
+  setOnFrozenSnapshotChanged(fn: () => void): void { this.onFrozenChanged = fn }
+
+  consumeFrozenRestoreReason(): string | undefined {
+    const reason = this.frozenRestoreReason
+    this.frozenRestoreReason = undefined
+    return reason
   }
 
   /** Current cached appendix length in chars (for cache-log observability). */
@@ -1349,6 +1437,11 @@ export class PromptEngine {
     // would stop byte-matching the last request. The pending entry survives in
     // frozenPendingMerged; buildOaiRequest's pending sweep commits it at the
     // next main-path build regardless of cachedFreshForUser.
+    //
+    // The active last-user anchor is part of the fresh cache too: without this
+    // flag the next build would find the old anchor and silently reuse the
+    // pre-change appendix even though cachedFreshForUser was cleared.
+    this.rebuildActiveAnchor = true
     this.cachedFreshForUser = ''
     this.cachedAppendix = ''
     this.cachedConsolidated = ''
@@ -1453,6 +1546,10 @@ export class PromptEngine {
    * drift apart.
    */
   resetAppendixBaseline(): void {
+    this.pruneAnchorsOnBuild = true
+    // History was rewritten under the same last-user occurrence key; the old
+    // active anchor may no longer match the message's role in the new history.
+    this.rebuildActiveAnchor = true
     this.lastEmittedAppendixParts = new Map()
     this.appendixBaselineSent = false
     this.appendixLedger.clear()

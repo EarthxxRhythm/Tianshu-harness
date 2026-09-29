@@ -208,7 +208,7 @@ describe('createProviderClient', () => {
       body = String(init?.body ?? '')
       const stream = new ReadableStream({
         start(controller) {
-          controller.enqueue(new TextEncoder().encode('event: message_delta\ndata: {"delta_stop_reason":"end_turn","usage":{}}\n\n'))
+          controller.enqueue(new TextEncoder().encode('event: message_delta\ndata: {"delta_stop_reason":"end_turn","usage":{}}\n\ndata: [DONE]\n\n'))
           controller.close()
         },
       })

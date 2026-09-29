@@ -15,7 +15,7 @@
  * with the text so downstream readers see the discipline inline.
  */
 import { execFile } from 'node:child_process'
-import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import { readFile, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { accessSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, extname, join } from 'node:path'
@@ -267,5 +267,38 @@ export async function extractDocumentText(
   return {
     ok: false,
     suggestion: `Text extraction unavailable (${failures.join('; ')}). ${suggestion}`,
+  }
+}
+
+/**
+ * 把 PDF 前 N 页渲染成 PNG dataUrl（poppler `pdftoppm`）——给 vision 模型的
+ * 页图通道（issue #300：文本抽取丢图）。与引擎链同款降级语义：poppler 未装 /
+ * 渲染失败 / 产出为空一律返回 []，绝不抛出——页图是增强，缺失时退回纯文本。
+ *
+ * runner 复用 CommandRunner（pdftoppm 不写 stdout，输出落到 outdir 的
+ * page-1.png … page-N.png）。调用方负责能力门（supportsVision / 识图桥）。
+ */
+export async function renderPdfPageImages(
+  filePath: string,
+  opts: { maxPages?: number; dpi?: number; runner?: CommandRunner } = {},
+): Promise<string[]> {
+  const maxPages = Math.max(1, Math.min(opts.maxPages ?? 3, 10))
+  const dpi = opts.dpi ?? 120
+  const runner = opts.runner ?? defaultRunner
+  const outDir = await mkdtemp(join(tmpdir(), 'rivet-pdfpages-'))
+  try {
+    await runner('pdftoppm', ['-png', '-r', String(dpi), '-f', '1', '-l', String(maxPages), filePath, join(outDir, 'page')], { timeoutMs: 60_000 })
+    const files = (await readdir(outDir)).filter((f) => f.endsWith('.png')).sort()
+    const out: string[] = []
+    for (const f of files) {
+      const bytes = await readFile(join(outDir, f))
+      if (bytes.length === 0) continue
+      out.push(`data:image/png;base64,${bytes.toString('base64')}`)
+    }
+    return out
+  } catch {
+    return []
+  } finally {
+    await rm(outDir, { recursive: true, force: true }).catch(() => {})
   }
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# finalize-linux-appimage.sh — 容器卷里已构建 AppImage 的后处理：pango 剔除
-# 重打包（issue #80）→ 宿主机验证完整性（原版公钥）→ tauri signer 本地补签。
+# finalize-linux-appimage.sh — 容器卷里已构建 AppImage 的后处理：Linux 收尾
+# （图形栈全系统化 + 运行时完整性对账）→ 宿主机验证完整性（原版公钥）→ tauri signer 本地补签。
 #
 # 场景：tauri build 已出包但 updater 签名步中断（&& 链使 repack 未跑）——产物
 # 在 docker volume tianshu-build-<arch> 里，本脚本就地补救，不必重跑 30 分钟构建。
@@ -27,7 +27,7 @@ docker run --rm --platform "linux/$ARCH" \
     export DEBIAN_FRONTEND=noninteractive
     apt-get update >/dev/null
     apt-get install -y curl ca-certificates file >/dev/null
-    bash /work/desktop/scripts/repack-appimage-pango.sh \"/work/$BUNDLE\"
+    bash /work/desktop/scripts/postprocess-linux-appimage.sh \"/work/$BUNDLE\"
     cd /tmp
     cp \"/work/$BUNDLE\" in.AppImage && chmod +x in.AppImage
     ./in.AppImage --appimage-extract >/dev/null

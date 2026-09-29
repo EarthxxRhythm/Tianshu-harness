@@ -90,8 +90,13 @@ async function runFirstByteWait(
   mock.timers.tick(tickMs)
   await flush()
   await flush()
-  // 未超时的分支：关流让 parse 正常收束（否则 promise 永挂）。
-  if (closeAfterTick) { ctl.close(); await flush() }
+  // 未超时的分支：补上结束标记再关流，让 parse 正常收束（否则 promise 永挂）。
+  if (closeAfterTick) {
+    ctl.enqueue(new TextEncoder().encode('data: [DONE]\n\n'))
+    await flush()
+    ctl.close()
+    await flush()
+  }
   await p
   return err
 }

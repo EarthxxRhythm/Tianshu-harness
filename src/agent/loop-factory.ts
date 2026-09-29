@@ -1,7 +1,9 @@
+import { cacheDiagnosticClass } from '../cache/cache-diagnostic-class.js'
 import type { AgentLoop } from './loop.js'
 import { TurnStreamController } from './turn-stream.js'
 import { persistStrippedImagesIfUnambiguous } from './persisted-image-strip.js'
 import { describeImages, visionCacheKey } from './vision-service.js'
+import { loadContextImage } from './context-image-archive.js'
 import { TurnCompletionController } from './turn-completion.js'
 import { ToolExecutionController } from './tool-execution.js'
 import type { RuntimeHookSnapshot } from './runtime-hooks.js'
@@ -66,7 +68,16 @@ export { runGateCompletion, type GateCompletionClient } from './gate-completion.
 export function createSidePathUsageRecorder(self: AgentLoop): (kind: string, usage: Partial<Usage>, model?: string, provider?: string) => void {
   return (kind, usage, model, provider) => {
     try {
-      if (!usage.input_tokens && !usage.output_tokens) return
+      // Keep "all usage fields unknown" observations: an aborted attempt with
+      // provider usage missing must still leave an identity-stamped cache-log
+      // row. Only truly empty calls (no observation and no numeric field) are
+      // dropped so they don't pollute totals/rate denominators.
+      const hasNumericUsage = (usage.input_tokens ?? 0) > 0
+        || (usage.output_tokens ?? 0) > 0
+        || (usage.cache_read_input_tokens ?? 0) > 0
+        || (usage.cache_creation_input_tokens ?? 0) > 0
+        || (usage.reasoning_tokens ?? 0) > 0
+      if (!hasNumericUsage && !usage.observation) return
       self.session.addSidePathUsage(usage)
       const input = usage.input_tokens ?? 0
       const hitRate = input > 0
@@ -74,6 +85,9 @@ export function createSidePathUsageRecorder(self: AgentLoop): (kind: string, usa
         : '0.0'
       const line = JSON.stringify({
         event: 'side_path',
+        ...usage.observation,
+        usageFields: usage.observation?.fields,
+          buildId: process.env.RIVET_BUILD_ID ?? 'unknown',
         kind,
         t: Date.now(),
         model: model ?? self.config.promptEngine.getModel(),
@@ -137,10 +151,12 @@ export function createReclaimDecisionRecorder(self: AgentLoop): (record: Reclaim
 
 export function createTurnStreamController(self: AgentLoop): TurnStreamController {
   return new TurnStreamController({
+      recordContextBudget: budget => self.recordContextBudget(budget),
       client: self.config.client,
       abortSignal: self.abortController?.signal ?? new AbortController().signal,
       getStreamedTextLength: () => self.streamedText.length,
       appendStreamedText: text => { self.streamedText += text },
+      truncateStreamedText: length => { self.streamedText = self.streamedText.slice(0, length) },
       getLastPrewarmAt: () => self.lastPrewarmAt,
       setLastPrewarmAt: position => { self.lastPrewarmAt = position },
       maybePrewarm: text => { self.prewarmController.maybePrewarm(text) },
@@ -158,12 +174,21 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
       // streamed reasoning. Record each failure in the cache-log so the loss
       // is attributable without reverse-engineering timestamp gaps.
       recordStreamAttemptAborted: info => {
+        if (info.usage) self.session.addSidePathUsage(info.usage)
         const sid = self.config.sessionId ?? 'anon'
         // abort 也要带走面包屑（2026-09-06 补盲）：分歧探针此前只在成功路径
         // （recordTurnCache）消费——abort 后面包屑滞留内存，被下一次成功请求
         // 的日志行误领。此处即消费即附，归因到真正产生它的这次失败尝试。
         const entry: Record<string, unknown> = {
           event: 'stream_attempt_aborted',
+          requestId: info.requestId, attemptId: info.attemptId,
+          usageFields: info.usage?.observation?.fields,
+          prefix: info.usage?.observation?.prefix,
+          status: 'aborted',
+            buildId: process.env.RIVET_BUILD_ID ?? 'unknown',
+          input: info.usage?.input_tokens, output: info.usage?.output_tokens,
+          estimated: info.usage?.estimated,
+          cacheRead: info.usage?.cache_read_input_tokens, cacheCreate: info.usage?.cache_creation_input_tokens,
           t: Date.now(),
           model: self.config.promptEngine.getModel(),
           provider: info.provider,
@@ -176,6 +201,7 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
         if (divergence) entry.prefixDiverged = divergence
         const wireDivergence = self.config.client.consumeWireDivergence?.()
         if (wireDivergence) entry.wireDiverged = wireDivergence
+        entry.classification = cacheDiagnosticClass(entry)
         const line = JSON.stringify(entry)
         import('node:fs/promises').then(fs => {
           const dir = join(getSessionDir(self.cwd), sid)
@@ -195,6 +221,9 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
         const observability = self.turnCacheObservability.consumeForRequest(streamObservability)
         const entry: Record<string, unknown> = {
           t: Date.now(), turn,
+          ...usage.observation,
+          usageFields: usage.observation?.fields,
+          buildId: process.env.RIVET_BUILD_ID ?? 'unknown',
           // model 让每条记录可溯源到具体模型 — /model 运行时切换后，
           // 同一会话的 cache-log 会跨多个模型，无此字段无法归因。
           model: self.config.promptEngine.getModel(),
@@ -204,7 +233,7 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
           input: usage.input_tokens,
           cacheRead: usage.cache_read_input_tokens,
           cacheCreate: usage.cache_creation_input_tokens,
-          hitRate: `${hitRate}%`,
+          hitRate: usage.observation && !usage.observation.fields.cache_read_input_tokens ? null : `${hitRate}%`,
           // Output token breakdown: total vs reasoning vs text. Phase 0 of the
           // output-token optimization — lets us see whether the spend is in
           // thinking (reasoning) or final prose (text) before any intervention.
@@ -300,7 +329,9 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
           if (stats) {
             if (stats.volatileSwaps > self.prevEngineStats.volatileSwaps) entry.volatileSwapped = true
             if (stats.frozenClamps > self.prevEngineStats.frozenClamps) entry.frozenClamped = true
-            if (stats.frozenFallbackRebuilds > self.prevEngineStats.frozenFallbackRebuilds) entry.frozenEvicted = true
+            const restoreReason = self.config.promptEngine.consumeFrozenRestoreReason()
+            if (restoreReason) entry.frozenRestoreReason = restoreReason
+            entry.frozenPersistence = self.persist?.getFrozenSnapshotError() ?? 'available'
             if (stats.toolsUpdates > self.prevEngineStats.toolsUpdates) entry.toolsUpdated = true
             if (stats.collapseWatermark > 0) entry.collapseWatermark = stats.collapseWatermark
             self.prevEngineStats = { volatileSwaps: stats.volatileSwaps, frozenClamps: stats.frozenClamps, frozenFallbackRebuilds: stats.frozenFallbackRebuilds, toolsUpdates: stats.toolsUpdates }
@@ -308,7 +339,9 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
 
           // Auto-diagnose on a hit-rate cliff (> 15 percentage-point drop).
           if (self.prevHitRate !== null && self.prevHitRate - hitRateNum > 15) {
-            const diag = diagnoseCacheMiss(self.session.getCacheHistory(), turn, null, wasRewritten)
+            const diag = diagnoseCacheMiss(self.session.getCacheHistory(), turn, null, wasRewritten, {
+              wireChanged: !!entry.wireDiverged, restored: !!entry.frozenRestoreReason, usageKnown: !usage.observation || !!usage.observation.fields.cache_read_input_tokens,
+            })
             if (diag) entry.diagnose = `${diag.reason}: ${diag.message}`
             // Cross-validate: tokenEfficiency also collapsing → cache-break compensation loop
             if (te !== undefined && self.prevTokenEfficiency !== undefined && self.prevTokenEfficiency > 0.5 && te < 0.2) {
@@ -319,6 +352,7 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
           if (te !== undefined) self.prevTokenEfficiency = te
         } catch { /* breadcrumbs are best-effort — never break cache logging */ }
 
+        entry.classification = cacheDiagnosticClass(entry)
         const line = JSON.stringify(entry)
         import('node:fs/promises').then(fs => {
           const dir = join(getSessionDir(self.cwd), sid)
@@ -409,7 +443,7 @@ export function createToolExecutionController(self: AgentLoop): ToolExecutionCon
       //  - 主控多模态 → 返回原图转发（pipeline 递给主控原生识图）。
       //  - text-only → 用 question 定向问视觉桥，命中缓存零调用。
       visionAsk: async (imageId, question, signal) => {
-        const img = self.imageRegistry.get(imageId)
+        const img = self.imageRegistry.get(imageId) ?? await loadContextImage(self.artifactStore, imageId)
         if (!img) {
           return { error: imageId ? `没有 id 为 ${imageId} 的图片` : '本会话没有可查询的图片' }
         }
@@ -1038,7 +1072,7 @@ export function createCompactBoundaryCoordinator(self: AgentLoop): CompactBounda
       invalidateSessionReadDedup(self.config.sessionId)
     },
     dietMessages: msgs => self.p3.dietMessages(msgs),
-    trySessionSplit: () => self.compaction.trySessionSplit(),
+    trySessionSplit: () => self.config.promptEngine.getRequestBudgetPolicy() ? Promise.resolve(false) : self.compaction.trySessionSplit(),
     maybeCompact: opts => self.compaction.maybeCompact(opts),
     tryPartialCompact: target => self.compaction.tryPartialCompact(target),
     shouldDelayCompact: (threshold, ctx) => self.cacheAdvisor.shouldDelayCompact(threshold, ctx?.estimatedTokens !== undefined && ctx?.contextWindow !== undefined ? { estimatedTokens: ctx.estimatedTokens, contextWindow: ctx.contextWindow } : undefined),
@@ -1226,6 +1260,8 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
 
     // === Session ===
     removeLastMessage: () => { self.session.removeLastMessage() },
+    preserveUserOnError: () => !!self.config.promptEngine.getRequestBudgetPolicy(),
+    recoverContextBudget: () => self.compactContextBudget(true),
     addUserMessage: (content) => { self.session.addUserMessage(content) },
     appendSystemReminder: (content, cls) => { self.session.appendSystemReminder(content, cls) },
     appendSystemReminderAndReport: (content) => self.session.appendSystemReminderAndReport(content),
@@ -1244,7 +1280,14 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     getCacheHistory: () => self.session.getCacheHistory(),
 
     // === Sub-processes (thin wrappers) ===
-    runCompaction: (turn, snap) => self.compactBoundaryCoordinator.runCompaction(turn, snap),
+    runCompaction: (turn, snap) => self.config.promptEngine.getRequestBudgetPolicy()
+      ? Promise.resolve().then(() => {
+        if (snap && snap.memory.heapUsedBytes / snap.memory.memoryLimitBytes >= 0.9) {
+          throw Object.assign(new Error('内存压力过高，已暂停本次执行。请减少附件或开启新会话。原历史仍保留。'), { name: 'ContextPreparationError' })
+        }
+        return { compacted: false, shouldAbort: false, userMessageConsumed: false }
+      })
+      : self.compactBoundaryCoordinator.runCompaction(turn, snap),
     runPerception: (turn, estTokens, callbacks) => self.turnStepProducer.runPerception(turn, estTokens, callbacks),
     runConvergenceCheck: (turn, phaseClass, assistantResponded, userMessageConsumed, callbacks) =>
       self.runConvergenceCheck(turn, phaseClass, assistantResponded, userMessageConsumed, callbacks),

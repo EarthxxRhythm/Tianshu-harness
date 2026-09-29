@@ -2,7 +2,7 @@ import type { BodyGuardNotice } from '../../api/request-body-guard.js'
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { TurnStreamController } from '../turn-stream.js'
-import type { StreamCallbacks } from '../../api/stream-client.js'
+import type { StreamAttemptAbortedInfo, StreamCallbacks } from '../../api/stream-client.js'
 import type { StreamClient } from '../../api/stream-client.js'
 import type { OaiChatRequest } from '../../api/oai-types.js'
 import type { Usage } from '../../api/types.js'
@@ -13,7 +13,10 @@ const request: OaiChatRequest = {
   max_tokens: 1024,
 }
 
-function makeController(client: StreamClient) {
+function makeController(
+  client: StreamClient,
+  overrides: Partial<ConstructorParameters<typeof TurnStreamController>[0]> = {},
+) {
   let streamedText = ''
   let lastPrewarmAt = 0
   const usage: Partial<Usage>[] = []
@@ -25,11 +28,13 @@ function makeController(client: StreamClient) {
     abortSignal: new AbortController().signal,
     getStreamedTextLength: () => streamedText.length,
     appendStreamedText: text => { streamedText += text },
+    truncateStreamedText: length => { streamedText = streamedText.slice(0, length) },
     getLastPrewarmAt: () => lastPrewarmAt,
     setLastPrewarmAt: position => { lastPrewarmAt = position },
     maybePrewarm: text => { prewarmed.push(text) },
     addUsage: u => { usage.push(u) },
     recordTurnCache: (turn, u, observability) => { turnCaches.push({ turn, usage: u, observability }) },
+    ...overrides,
   })
 
   return { controller, getStreamedText: () => streamedText, usage, turnCaches, prewarmed }
@@ -92,7 +97,7 @@ describe('TurnStreamController', () => {
       client,
       abortSignal: new AbortController().signal,
       getStreamedTextLength: () => 0,
-      appendStreamedText: () => {},
+      appendStreamedText: () => {}, truncateStreamedText: () => {},
       getLastPrewarmAt: () => 0,
       setLastPrewarmAt: () => {},
       maybePrewarm: () => {},
@@ -134,7 +139,7 @@ describe('TurnStreamController', () => {
       client,
       abortSignal: new AbortController().signal,
       getStreamedTextLength: () => 0,
-      appendStreamedText: () => {},
+      appendStreamedText: () => {}, truncateStreamedText: () => {},
       getLastPrewarmAt: () => 0,
       setLastPrewarmAt: () => {},
       maybePrewarm: () => {},
@@ -274,7 +279,99 @@ describe('TurnStreamController', () => {
 
     assert.equal(result.streamError, expected)
     assert.equal(result.collectedBlocks.length, 1)
-    assert.equal(usage.at(-1)?.output_tokens, 4)
+    assert.equal(usage.at(-1)?.output_tokens, 2)
+    assert.equal(usage.at(-1)?.estimated, true, 'locally estimated output must be marked')
+  })
+
+  it('does not double-book output when the aborted attempt already reported usage', async () => {
+    const expected = new Error('stream failed')
+    const aborted: StreamAttemptAbortedInfo[] = []
+    const client: StreamClient = {
+      stream: mock.fn(async (_request: OaiChatRequest, cb: StreamCallbacks) => {
+        cb.onTextDelta('partial')
+        cb.onContentBlock({ type: 'text', text: 'partial' })
+        cb.onStreamAttemptAborted?.({
+          usage: {
+            input_tokens: 100,
+            output_tokens: 10,
+            observation: {
+              requestId: 'req-1', attemptId: 'req-1:1', status: 'aborted',
+              fields: { input_tokens: 'prompt_tokens', output_tokens: 'completion_tokens' },
+            },
+          },
+          provider: 'test',
+          receivedChars: 7,
+          elapsedMs: 1,
+          errorName: expected.name,
+          errorMessage: expected.message,
+        })
+        throw expected
+      }),
+    }
+    const { controller, usage } = makeController(client, {
+      recordStreamAttemptAborted: info => { aborted.push(info) },
+    })
+
+    const result = await controller.streamTurn({
+      request,
+      turn: 1,
+      lastTurnTextFingerprint: '',
+      callbacks: {
+        onTextDelta: () => {},
+        onThinkingDelta: () => {},
+        onToolUse: () => {},
+        onError: () => {},
+      },
+    })
+
+    assert.equal(result.streamError, expected)
+    assert.equal(aborted.length, 1)
+    assert.equal(aborted[0]?.usage?.output_tokens, 10)
+    assert.equal(usage.length, 0,
+      'provider-reported abort usage must not be followed by a second text-length estimate')
+  })
+
+  it('still estimates when the aborted attempt has no output usage', async () => {
+    const expected = new Error('stream failed')
+    const client: StreamClient = {
+      stream: mock.fn(async (_request: OaiChatRequest, cb: StreamCallbacks) => {
+        cb.onTextDelta('partial')
+        cb.onStreamAttemptAborted?.({
+          usage: {
+            input_tokens: 100, output_tokens: 0,
+            observation: {
+              requestId: 'req-2', attemptId: 'req-2:1', status: 'aborted',
+              fields: { input_tokens: 'prompt_tokens' },
+            },
+          },
+          provider: 'test',
+          receivedChars: 7,
+          elapsedMs: 1,
+          errorName: expected.name,
+          errorMessage: expected.message,
+        })
+        throw expected
+      }),
+    }
+    const { controller, usage } = makeController(client, {
+      recordStreamAttemptAborted: info => { if (info.usage) usage.push(info.usage) },
+    })
+
+    await controller.streamTurn({
+      request,
+      turn: 1,
+      lastTurnTextFingerprint: '',
+      callbacks: {
+        onTextDelta: () => {},
+        onThinkingDelta: () => {},
+        onToolUse: () => {},
+        onError: () => {},
+      },
+    })
+
+    assert.equal(usage.length, 1)
+    assert.equal(usage[0]?.output_tokens, 2)
+    assert.equal(usage[0]?.estimated, true)
   })
 
   it('suppresses consecutive duplicate chunks (≥50 chars)', async () => {
@@ -461,7 +558,7 @@ describe('TurnStreamController', () => {
     } as unknown as StreamClient
     const controller = new TurnStreamController({
       client: stubClient, abortSignal: new AbortController().signal,
-      getStreamedTextLength: () => 0, appendStreamedText: () => {},
+      getStreamedTextLength: () => 0, appendStreamedText: () => {}, truncateStreamedText: () => {},
       getLastPrewarmAt: () => 0, setLastPrewarmAt: () => {}, maybePrewarm: () => {},
       prewarmFile: () => { order.push('prewarm-ran') },
       addUsage: () => {}, recordTurnCache: () => {},
@@ -545,7 +642,7 @@ describe('TurnStreamController', () => {
       client,
       abortSignal: new AbortController().signal,
       getStreamedTextLength: () => 0,
-      appendStreamedText: () => {},
+      appendStreamedText: () => {}, truncateStreamedText: () => {},
       getLastPrewarmAt: () => 0,
       setLastPrewarmAt: () => {},
       maybePrewarm: () => {},
@@ -588,7 +685,7 @@ describe('TurnStreamController', () => {
       client,
       abortSignal: new AbortController().signal,
       getStreamedTextLength: () => 0,
-      appendStreamedText: () => {},
+      appendStreamedText: () => {}, truncateStreamedText: () => {},
       getLastPrewarmAt: () => 0,
       setLastPrewarmAt: () => {},
       maybePrewarm: () => {},
@@ -661,7 +758,7 @@ describe('TurnStreamController', () => {
       client,
       abortSignal: new AbortController().signal,
       getStreamedTextLength: () => 0,
-      appendStreamedText: () => {},
+      appendStreamedText: () => {}, truncateStreamedText: () => {},
       getLastPrewarmAt: () => 0,
       setLastPrewarmAt: () => {},
       maybePrewarm: () => {},
@@ -750,4 +847,42 @@ describe('TurnStreamController', () => {
       assert.equal(result.triggeredRule, undefined, 'disabled rule must not trigger')
     })
   })
+})
+
+describe('native context budget observation', () => {
+  it('uses cache-inclusive measured input, and does not add generated reasoning twice', async () => {
+    const { buildContextBudget } = await import('../../context/request-budget.js')
+    const budget = buildContextBudget({ model: 'deepseek-flash', messages: [], max_tokens: 384_000 },
+      { windowTokens: 1_000_000, maxOutputTokens: 393_216 }, { requestId: 'observed', revision: 1 })
+    const seen: import('../../server/protocol.js').ContextBudgetSnapshot[] = []
+    const { controller } = makeController({ stream: async (_r, cb) => {
+      cb.onContextBudget?.(budget)
+      cb.onStopReason('end_turn', { input_tokens: 600_000, cache_read_input_tokens: 590_000, output_tokens: 50_000, reasoning_tokens: 40_000 })
+    } })
+    await controller.streamTurn({ request: { ...request, contextBudget: budget }, turn: 0, lastTurnTextFingerprint: '',
+      callbacks: { onTextDelta: () => {}, onThinkingDelta: () => {}, onToolUse: () => {}, onError: () => {}, onContextBudget: b => { seen.push(b) } } })
+    const measured = seen[seen.length - 1]!
+    assert.equal(measured.inputTokens, 600_000)
+    assert.equal(measured.generatedTokens, 50_000)
+    assert.equal(measured.state, 'blocked')
+    assert.equal(measured.source, 'measured')
+  })
+})
+
+it('a late stream keeps its own request identity after its first observation was rejected', async () => {
+  const { buildContextBudget } = await import('../../context/request-budget.js')
+  const old = buildContextBudget({ model: 'deepseek-flash', messages: [], max_tokens: 256_000 },
+    { windowTokens: 1_000_000, maxOutputTokens: 393_216 }, { requestId: 'old', revision: 1 })
+  const current = { ...old, requestId: 'new' }
+  const recorded: string[] = [], published: string[] = []
+  const controller = new TurnStreamController({
+    client: { stream: async (_r, cb) => { cb.onContextBudget?.(old); cb.onStopReason('end_turn', { input_tokens: 999_000 }) } },
+    recordContextBudget: budget => { recorded.push(budget.requestId); return current },
+    abortSignal: new AbortController().signal, getStreamedTextLength: () => 0, appendStreamedText: () => {}, truncateStreamedText: () => {},
+    getLastPrewarmAt: () => 0, setLastPrewarmAt: () => {}, maybePrewarm: () => {}, addUsage: () => {}, recordTurnCache: () => {},
+  })
+  await controller.streamTurn({ request: { ...request, contextBudget: old }, turn: 0, lastTurnTextFingerprint: '',
+    callbacks: { onTextDelta: () => {}, onThinkingDelta: () => {}, onToolUse: () => {}, onError: () => {}, onContextBudget: b => { published.push(b.requestId) } } })
+  assert.deepEqual(recorded, ['old', 'old'])
+  assert.deepEqual(published, [])
 })

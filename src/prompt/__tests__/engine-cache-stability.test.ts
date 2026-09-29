@@ -1190,7 +1190,8 @@ describe('frozen snapshot orphaning across turn boundaries (2026-07-06 regressio
     const engine = mkEngine()
     const history: OaiMessage[] = [{ role: 'user', content: 'task A' }]
     engine.buildOaiRequest([...history])
-    // Simulate old-session damage: snapshots fully lost (eviction / orphaned data).
+    // Simulate loss of both the v2 anchors and legacy snapshots.
+    ;(engine as unknown as { anchors: { retain(keys: Set<string>): void } }).anchors.retain(new Set())
     ;(engine as unknown as { frozenUserMerged: Map<string, string[]> }).frozenUserMerged.clear()
     ;(engine as unknown as { frozenPendingMerged: Map<string, string> }).frozenPendingMerged.clear()
 

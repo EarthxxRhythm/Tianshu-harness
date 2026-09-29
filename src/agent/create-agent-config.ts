@@ -1,3 +1,4 @@
+import { deepSeekBudgetPolicy } from '../context/request-budget.js'
 import { createProviderClient, resolveApiKey } from '../api/factory.js'
 import { resolveCapabilities } from '../api/provider.js'
 import { createAuthProvider } from '../auth/registry.js'
@@ -264,6 +265,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     : applyDescriptionMode(input.toolDefinitions, blockPolicy.toolDescriptions)
 
   const promptEngine = new PromptEngine({
+    requestBudgetPolicy: primaryClient.previewContextRequest ? deepSeekBudgetPolicy(provider.baseUrl, model.id, model.contextWindow) : undefined,
     model: model.id,
     maxTokens: model.maxTokens,
     staticCtx: { tools: gatedTools, modelFamily: detectModelFamily(model.id) },

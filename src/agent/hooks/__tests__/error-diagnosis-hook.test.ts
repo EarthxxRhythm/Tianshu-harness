@@ -134,3 +134,39 @@ describe('createErrorDiagnosisHook — 去重', () => {
     }
   })
 })
+
+describe('createErrorDiagnosisHook — patch_rejected', () => {
+  const PATCH_DIFF = 'diff --git a/src/foo.ts b/src/foo.ts\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1 +1 @@\n-old\n+new\n'
+
+  function makePatchTool(failureClass?: string): RuntimeToolEvent {
+    return {
+      name: 'apply_patch',
+      isError: true,
+      success: false,
+      input: { diff: PATCH_DIFF },
+      target: 'unknown',
+      failureClass,
+      rawOutput: '',
+      parsedOutput: null,
+      durationMs: 5,
+    } as unknown as RuntimeToolEvent
+  }
+
+  it('patch_rejected → 发射 git apply 诊断', () => {
+    const bus = mockBus()
+    const hook = createErrorDiagnosisHook({ advisoryBus: bus })
+    hook.run(makeCtx(1), makePatchTool('patch_rejected'))
+    assert.equal(bus._submissions.length, 1)
+    assert.match(bus._submissions[0]!.content, /git apply/)
+    assert.match(bus._submissions[0]!.content, /read_file/)
+  })
+
+  it('apply_patch 同目标第 2 次连续失败 → 去重跳过（让位 edit-failure-recovery）', () => {
+    const bus = mockBus()
+    const hook = createErrorDiagnosisHook({ advisoryBus: bus })
+    hook.run(makeCtx(1), makePatchTool('patch_rejected'))
+    assert.equal(bus._submissions.length, 1, 'first failure should fire')
+    hook.run(makeCtx(1), makePatchTool('patch_rejected'))
+    assert.equal(bus._submissions.length, 1, 'second failure on same target should dedup')
+  })
+})

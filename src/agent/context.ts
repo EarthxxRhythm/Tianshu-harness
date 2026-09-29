@@ -135,6 +135,28 @@ export type MessageMutation =
   | { type: 'replace'; messages: OaiMessage[] }
 
 export class SessionContext {
+  private cacheCoverage = { input: 0, read: 0, observed: 0, unknown: 0, creationUnknown: 0 }
+  private hasUsageObservation = false
+  private accountedAttempts = new Set<string>()
+  private acceptUsage(usage: Partial<Usage>, main: boolean): boolean {
+    if (usage.observation) {
+      this.hasUsageObservation = true
+      const key = `${usage.observation.requestId}:${usage.observation.attemptId}`
+      if (this.accountedAttempts.has(key)) return false
+      this.accountedAttempts.add(key)
+    }
+    const fields = usage.observation?.fields
+    if (fields && !fields.cache_creation_input_tokens) this.cacheCoverage.creationUnknown++
+    if (main) {
+      if ((!fields || (fields.input_tokens && fields.cache_read_input_tokens)) && (usage.input_tokens ?? 0) > 0) {
+        this.cacheCoverage.input += usage.input_tokens ?? 0
+        this.cacheCoverage.read += usage.cache_read_input_tokens ?? 0
+        this.cacheCoverage.observed++
+      } else this.cacheCoverage.unknown++
+    }
+    return true
+  }
+
   private state: SessionState
   private onMutation: ((m: MessageMutation) => void) | null = null
   /** Goal-anchor tracking（spec 3c 动作 B 补强）：user 消息进入时提取当前
@@ -385,7 +407,7 @@ export class SessionContext {
     return msg
   }
 
-  replaceMessages(messages: OaiMessage[]): void {
+  replaceMessages(messages: OaiMessage[], options?: { alreadyPersisted: boolean }): void {
     this.state.oaiMessages = messages
     this.state.estimatedTokens = estimateOaiTokens(messages)
     // Compaction rebuilt the history → the real-prompt anchor now reflects the
@@ -396,7 +418,7 @@ export class SessionContext {
     this.state.tailEstimate = 0
     // Snapshot the array so subsequent mutations to state.oaiMessages don't
     // bleed into a listener's deferred work (e.g. async disk write).
-    this.onMutation?.({ type: 'replace', messages: messages.slice() })
+    if (!options?.alreadyPersisted) this.onMutation?.({ type: 'replace', messages: messages.slice() })
   }
 
   /**
@@ -483,6 +505,7 @@ export class SessionContext {
   }
 
   addUsage(usage: Partial<Usage>): void {
+    if (!this.acceptUsage(usage, true)) return
     const u = this.state.totalUsage
     if (usage.input_tokens) {
       u.input_tokens += usage.input_tokens
@@ -521,6 +544,9 @@ export class SessionContext {
     if (usage.cache_read_input_tokens) u.cache_read_input_tokens += usage.cache_read_input_tokens
     if (usage.cache_creation_input_tokens) u.cache_creation_input_tokens += usage.cache_creation_input_tokens
     if (usage.reasoning_tokens) u.reasoning_tokens = (u.reasoning_tokens ?? 0) + usage.reasoning_tokens
+    // Cumulative snapshot keeps the marker so consumers can tell that part of
+    // output_tokens was locally estimated rather than provider-reported.
+    if (usage.estimated) u.estimated = true
   }
 
   /**
@@ -534,6 +560,8 @@ export class SessionContext {
    * so routing it through addUsage would poison those anchors.
    */
   addSidePathUsage(usage: Partial<Usage>): void {
+    if (!this.acceptUsage(usage, false)) return
+    if (usage.estimated) this.state.totalUsage.estimated = true
     const u = this.state.totalUsage
     if (usage.input_tokens) u.input_tokens += usage.input_tokens
     if (usage.output_tokens) u.output_tokens += usage.output_tokens
@@ -545,6 +573,7 @@ export class SessionContext {
   getCacheHitRate(): number {
     // Use total input_tokens as denominator — cache_read / (cacheRead + cacheCreation)
     // degenerates to 100% when cacheCreation is 0 (provider doesn't report miss tokens).
+    if (this.cacheCoverage.observed || this.cacheCoverage.unknown) return this.cacheCoverage.input > 0 ? this.cacheCoverage.read / this.cacheCoverage.input : 0
     const input = this.state.totalUsage.input_tokens
     return input === 0 ? 0 : Math.min(1, this.state.totalUsage.cache_read_input_tokens / input)
   }
@@ -576,7 +605,7 @@ export class SessionContext {
   }
 
   getTotalUsage(): Usage {
-    return { ...this.state.totalUsage }
+    return { ...this.state.totalUsage, ...(this.hasUsageObservation ? { cacheCoverage: { ...this.cacheCoverage } } : {}) }
   }
 
   getEstimatedTokens(): number {
@@ -671,6 +700,7 @@ export class SessionContext {
   }
 
   recordTurnCache(turn: number, usage: Usage): void {
+    if (usage.observation && (!usage.observation.fields.input_tokens || !usage.observation.fields.cache_read_input_tokens)) return
     this.state.turnCacheHistory.push({
       turn,
       cacheRead: usage.cache_read_input_tokens,

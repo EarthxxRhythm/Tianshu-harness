@@ -129,3 +129,15 @@ describe('AgentLoop idle compaction', () => {
     await inflight
   })
 })
+
+describe('native request budgeting owns compaction', () => {
+  it('idle time and legacy stale debt do not rewrite a native hot prefix', async () => {
+    const agent = makeAgent(true)
+    mock.method(agent.config.promptEngine, 'getRequestBudgetPolicy', () => ({ windowTokens: 1_000_000, maxOutputTokens: 393_216 }))
+    const fn = mockCoordinator(agent)
+    agent.pendingStaleCompact = true
+    agent.session.getEstimatedTokens = () => 950_000
+    await agent.runIdleCompaction()
+    assert.equal(fn.mock.callCount(), 0)
+  })
+})

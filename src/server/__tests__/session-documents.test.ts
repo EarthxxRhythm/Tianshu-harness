@@ -146,3 +146,82 @@ test('POST /sessions/:id/prompt documents 校验走同一 helper（重构回归�
   assert.equal(res.status, 400)
   assert.match((res.body as { error: string }).error, /non-empty array/)
 })
+
+// ── issue #300：附件卡片元数据 + 原文持久化回读 ──────────────────────────
+
+class MemDocPersistence implements SessionPersistenceAdapter {
+  docs = new Map<string, { bytes: Buffer; mime: string; ext: string }>()
+  saveRecord(): void {}
+  loadAll() { return [] }
+  appendEvent(): void {}
+  saveDocument(sessionId: string, docId: string, base64: string, fileName: string): void {
+    this.docs.set(`${sessionId}/${docId}`, { bytes: Buffer.from(base64, 'base64'), mime: 'application/pdf', ext: fileName.split('.').pop() ?? 'bin' })
+  }
+  readDocument(sessionId: string, docId: string) {
+    return this.docs.get(`${sessionId}/${docId}`)
+  }
+}
+
+function setupWithPersistence() {
+  const persistence = new MemDocPersistence()
+  const agents: FakeAgent[] = []
+  const manager = new RuntimeSessionManager({
+    createAgent: () => { const a = new FakeAgent(); agents.push(a); return a },
+    defaultCwd: '/tmp/work',
+    persistence,
+  })
+  const router = createRouter(buildSessionRoutes(manager, TOKEN))
+  return { manager, agents, router, persistence }
+}
+
+test('issue #300：/prompt 携带文档 → user 事件带 documents 引用 + promptText，text 保持模型可见全文', async () => {
+  const { manager, router } = setupWithPersistence()
+  const rec = manager.createSession({ cwd: '/tmp/work' }) as { id: string }
+  const res = await router('POST', `/sessions/${rec.id}/prompt`, { prompt: '总结这份文档', documents: [PDF_DOC] }, AUTH)
+  assert.equal(res.status, 200)
+
+  const user = manager.getEvents(rec.id, 0)!.events.find((e) => e.type === 'user')!
+  const docs = user.data.documents as Array<{ id: string; name: string; bytes: number; mime: string }>
+  assert.equal(docs.length, 1, 'user 事件必须携带文档引用元数据')
+  assert.equal(docs[0]!.name, 'spec.pdf')
+  assert.equal(docs[0]!.mime, 'application/pdf')
+  assert.ok(docs[0]!.bytes > 0, 'bytes 由服务端解码自算')
+  assert.equal(user.data.promptText, '总结这份文档', 'UI 据此渲染用户原文而非拼接全文')
+  assert.ok(String(user.data.text).includes('[document: spec.pdf]'), 'text 仍是模型可见全文（含抽取块）')
+  assert.ok(!('dataUrl' in docs[0]!), '事件流不得携带 base64 原文')
+})
+
+test('issue #300：文档原文可经 GET /sessions/:id/documents/:docId 回读（字节级一致）', async () => {
+  const { manager, router } = setupWithPersistence()
+  const rec = manager.createSession({ cwd: '/tmp/work' }) as { id: string }
+  const res = await router('POST', `/sessions/${rec.id}/prompt`, { prompt: 'x', documents: [PDF_DOC] }, AUTH)
+  assert.equal(res.status, 200)
+
+  const user = manager.getEvents(rec.id, 0)!.events.find((e) => e.type === 'user')!
+  const docId = (user.data.documents as Array<{ id: string }>)[0]!.id
+  const got = manager.readDocument(rec.id, docId)
+  assert.ok(got, '原文必须可读回')
+  assert.deepEqual(got!.bytes, Buffer.from(PDF_DOC.dataUrl.split(',')[1]!, 'base64'))
+  assert.equal(got!.mime, 'application/pdf')
+})
+
+test('issue #300：不带 documents 的 user 事件不出现新字段（回归）', async () => {
+  const { manager, router } = setup()
+  const rec = manager.createSession({ cwd: '/tmp/work' }) as { id: string }
+  await router('POST', `/sessions/${rec.id}/prompt`, { prompt: 'plain' }, AUTH)
+  const user = manager.getEvents(rec.id, 0)!.events.find((e) => e.type === 'user')!
+  assert.equal(user.data.documents, undefined)
+  assert.equal(user.data.promptText, undefined)
+})
+
+test('issue #300：PDF 附件 + 无 vision 通路 → 不尝试页图、run 正常携带原文元数据', async () => {
+  const { manager, agents, router } = setupWithPersistence()
+  const rec = manager.createSession({ cwd: '/tmp/work' }) as { id: string }
+  const res = await router('POST', `/sessions/${rec.id}/prompt`, { prompt: '看图', documents: [PDF_DOC] }, AUTH)
+  assert.equal(res.status, 200)
+  // FakeAgent 无 getVisionBridge → 页图通道关闭；run 正常启动且不带图片
+  assert.equal(agents.length, 1)
+  const user = manager.getEvents(rec.id, 0)!.events.find((e) => e.type === 'user')!
+  assert.equal((user.data.documents as unknown[]).length, 1)
+  assert.equal(user.data.imageIds, undefined)
+})

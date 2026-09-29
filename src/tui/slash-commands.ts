@@ -725,6 +725,14 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         return true
       }
 
+      if (ctx.agent.config.promptEngine.getRequestBudgetPolicy()) {
+        setIsStreaming(true)
+        void ctx.agent.compactContext().then(changed => {
+          pushStatic(createLogEntry({ type: 'system', content: changed ? '上下文已整理，原始内容已归档。' : '未替换历史：当前没有足够的安全回收空间。' }))
+        }, error => { pushStatic(createLogEntry({ type: 'system', content: String(error) })) }).finally(() => setIsStreaming(false))
+        return true
+      }
+
       if (sub === 'llm' || sub === 'deep') {
         // LLM compact — deferred to next turn (triggers automatically at thresholds)
         pushStatic(createLogEntry({ type: 'system', content: `LLM compact will trigger automatically at context thresholds (currently ${beforeTokens.toLocaleString()} tokens). Use /compact for immediate micro-compact.` }))
@@ -3345,7 +3353,11 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         const target = snapshots[idx]!
         const pinnedPush = pushStatic
         fh.rewind(target.messageId).then(
-          restored => pinnedPush(createLogEntry({ type: 'system', content: `Undo complete. Restored files: ${restored.join(', ') || '(none)'}` })),
+          restored => {
+            const skipped = restored.skipped
+            const skippedNote = skipped.length > 0 ? `; skipped ${skipped.length} claimed by other sessions: ${skipped.join(', ')}` : ''
+            pinnedPush(createLogEntry({ type: 'system', content: `Undo complete. Restored files: ${restored.join(', ') || '(none)'}${skippedNote}` }))
+          },
           err => pinnedPush(createLogEntry({ type: 'system', content: `Undo failed: ${(err as Error).message}` })),
         )
         pushStatic(createLogEntry({ type: 'system', content: `Undoing snapshot #${idx + 1}...` }))

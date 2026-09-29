@@ -10,9 +10,13 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { RuntimeSessionManager, type ManagedAgent } from '../session-manager.js'
 import { buildSessionRoutes } from '../session-routes.js'
 import { createRouter } from '../index.js'
+import { FileHistory } from '../../agent/file-history.js'
 import { SessionContext } from '../../agent/context.js'
 import type { AgentCallbacks } from '../../agent/loop-types.js'
 import type { Artifact } from '../../artifact/types.js'
@@ -409,6 +413,65 @@ test('#14 concurrent listRewindPoints share one lazy agent build (agentBuilds lo
   const r3 = await manager.listRewindPoints(s.id)
   assert.equal(agents.length, 1, 'settled agent is reused, no rebuild')
   assert.deepEqual(r3, r1, 'same points again')
+})
+
+/** Agent with a real FileHistory so precise-rewind guard behavior is testable. */
+class FileHistoryAgent extends RewindableAgent {
+  constructor(private fh: FileHistory) { super() }
+  getFileHistory(): FileHistory { return this.fh }
+}
+
+test('#16 precise rewind skips a file exclusively claimed by another session and reports it', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'rewind-claim-cwd-'))
+  const backup = mkdtempSync(join(tmpdir(), 'rewind-claim-bak-'))
+  const own = join(cwd, 'own.ts')
+  const peer = join(cwd, 'peer.ts')
+  try {
+    writeFileSync(own, 'own@boundary')
+    writeFileSync(peer, 'peer@boundary')
+    const fh = new FileHistory(backup, 'session-A')
+    await fh.trackEdit(own, 'w1')
+    writeFileSync(own, 'own-new')
+    await fh.trackEdit(peer, 'w2')
+    writeFileSync(peer, 'peer-in-flight')
+
+    const messages = [
+      { role: 'user', content: 'boundary' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'w1', function: { name: 'write_file', arguments: '{}' } }] },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'w2', function: { name: 'write_file', arguments: '{}' } }] },
+    ] as OaiMessage[]
+    const registry = {
+      reapStaleClaims: () => [],
+      checkClaim: (filePath: string) =>
+        filePath === 'peer.ts' || filePath === peer
+          ? { sessionId: 'session-B', claimType: 'exclusive' }
+          : null,
+    }
+    let agent!: FileHistoryAgent
+    const manager = new RuntimeSessionManager({
+      createAgent: () => (agent = new FileHistoryAgent(fh)),
+      defaultCwd: cwd,
+      getSessionRegistry: () => registry as any,
+    })
+    const s = manager.createSession({ prompt: 'init' })
+    await new Promise(r => setTimeout(r, 10))
+    agent.messages = messages
+
+    const preview = manager.previewFilesPrecise(s.id, 0)!
+    assert.equal(preview.files.find(f => f.path === peer)?.action, 'blocked', 'preview warns before confirm')
+    assert.equal(preview.files.find(f => f.path === peer)?.blockedBy, 'session-B')
+
+    const result = (await manager.rewindFilesPrecise(s.id, 0))!
+    assert.equal(result.success, true)
+    assert.deepEqual(result.filesChanged, [own])
+    assert.deepEqual(result.skipped, [peer])
+    assert.deepEqual(result.skippedBy, [{ path: peer, sessionId: 'session-B', claimType: 'exclusive' }])
+    assert.equal(readFileSync(own, 'utf-8'), 'own@boundary', 'unclaimed file restored')
+    assert.equal(readFileSync(peer, 'utf-8'), 'peer-in-flight', 'peer in-flight edit must survive A rewind')
+  } finally {
+    rmSync(cwd, { recursive: true, force: true })
+    rmSync(backup, { recursive: true, force: true })
+  }
 })
 
 test('#15 failed lazy build does not leak an unhandled rejection (lock cleanup)', async () => {

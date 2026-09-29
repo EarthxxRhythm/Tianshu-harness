@@ -1,12 +1,13 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   buildEngineChain,
   extractDocumentText,
   isExtractableDocument,
+  renderPdfPageImages,
   EXTRACTION_CAVEAT,
   type CommandRunner,
 } from '../doc-extract.js'
@@ -177,5 +178,33 @@ trailer<</Root 1 0 R>>
   it('EXTRACTION_CAVEAT flags lossy layout for downstream consumers', () => {
     assert.match(EXTRACTION_CAVEAT, /lossy/)
     assert.match(EXTRACTION_CAVEAT, /original file/)
+  })
+
+  // issue #300 — PDF 页图渲染（vision 补偿通道）
+  describe('renderPdfPageImages', () => {
+    it('pdftoppm 成功 → 返回页图 dataUrl（按页排序）', async () => {
+      const runner: CommandRunner = async (_binary, args) => {
+        const outPrefix = args[args.length - 1]!
+        writeFileSync(`${outPrefix}-1.png`, Buffer.from('fake-png-1'))
+        writeFileSync(`${outPrefix}-2.png`, Buffer.from('fake-png-2'))
+        return { stdout: '' }
+      }
+      const pages = await renderPdfPageImages('/tmp/whatever.pdf', { runner, maxPages: 3 })
+      assert.equal(pages.length, 2)
+      assert.ok(pages[0]!.startsWith('data:image/png;base64,'))
+      assert.equal(Buffer.from(pages[0]!.split(',')[1]!, 'base64').toString(), 'fake-png-1')
+    })
+
+    it('pdftoppm 未装（ENOENT）→ 静默降级为空数组，绝不抛出', async () => {
+      const runner: CommandRunner = async () => { throw enoent() }
+      const pages = await renderPdfPageImages('/tmp/whatever.pdf', { runner })
+      assert.deepEqual(pages, [])
+    })
+
+    it('渲染产出为空目录 → 空数组（扫描件/异常 PDF 不炸调用方）', async () => {
+      const runner: CommandRunner = async () => ({ stdout: '' })
+      const pages = await renderPdfPageImages('/tmp/whatever.pdf', { runner })
+      assert.deepEqual(pages, [])
+    })
   })
 })

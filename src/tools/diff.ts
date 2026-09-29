@@ -101,9 +101,14 @@ Good: diff(path="src/api/client.ts") — 显示单个文件的 diff`,
       child.on('close', async (code) => {
         clearTimeout(timer)
         if (signal) signal.removeEventListener('abort', onAbort)
-        if (stderr.trim()) {
-          const rawPath = await persistRawOutput(params.toolUseId, stderr.trim())
-          resolve({ content: `错误：${stderr.trim()}`, rawPath, isError: true })
+        // 以退出码为准，不看 stderr：git diff 成功时也会往 stderr 打 warning
+        //（core.autocrlf=true 下每个 LF 文件一条 CRLF 提示——Windows 默认配置、
+        // 不可读的 core.attributesFile 等），此前任何 stderr 都判错并丢弃
+        // stdout 里的完整 diff，该场景下每次 diff 都误报。
+        if (code !== 0) {
+          const detail = stderr.trim() || `git diff 退出码 ${code ?? 'null'}`
+          const rawPath = await persistRawOutput(params.toolUseId, detail)
+          resolve({ content: `错误：${detail}`, rawPath, isError: true })
           return
         }
         if (!stdout.trim()) {
@@ -111,7 +116,7 @@ Good: diff(path="src/api/client.ts") — 显示单个文件的 diff`,
           return
         }
         const durationMs = Date.now() - startTime
-        const meta = { command: 'git diff', exitCode: code ?? 0, durationMs }
+        const meta = { command: 'git diff', exitCode: 0, durationMs }
         const rawPath = await persistRawOutput(params.toolUseId, stdout)
         resolve({
           content: buildModelOutput(truncateDiff(stdout), { ...meta, rawPath }),

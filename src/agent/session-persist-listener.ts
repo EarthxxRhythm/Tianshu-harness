@@ -1,5 +1,6 @@
 import { type SessionContext } from './context.js'
 import { type SessionPersist } from './session-persist.js'
+import type { OaiMessage } from '../api/oai-types.js'
 import { debugLog } from '../utils/debug.js'
 
 /**
@@ -14,11 +15,14 @@ import { debugLog } from '../utils/debug.js'
 export function attachSessionPersistListener(deps: {
   session: SessionContext
   persist: SessionPersist
-}): { drain: () => Promise<void> } {
+}): { drain: () => Promise<void>; commitCompaction: (expected: OaiMessage[], candidate: OaiMessage[]) => Promise<void> } {
   const { session, persist } = deps
   let writeChain: Promise<void> = Promise.resolve()
   let writeFailure: unknown
+  let rewriteActive = false
+  let rewriteRevision = 0
   session.setMutationListener((m) => {
+    if (rewriteActive) { rewriteRevision++; return }
     if (m.type === 'append') {
       const msg = m.message
       // 2026-09-08 crash-recovery fix: shrink the hard-kill loss window to
@@ -83,7 +87,41 @@ export function attachSessionPersistListener(deps: {
         })
     }
   })
-  return { drain: async () => {
+  const commitCompaction = (expected: OaiMessage[], candidate: OaiMessage[]): Promise<void> => {
+    const operation = writeChain.then(async () => {
+      if (writeFailure) throw writeFailure
+      await persist.flushSessionBuffer()
+      const live = session.getMessages()
+      if (live.length !== expected.length || live.some((m, i) => m !== expected[i])) throw new Error('历史在整理期间发生变化，请重新整理')
+      rewriteActive = true
+      const revision = rewriteRevision
+      let restoredRevision = revision
+      try {
+        await persist.compactOaiAsync(candidate, true)
+        if (rewriteRevision !== revision) throw new Error('历史在整理落盘期间发生变化，已取消替换')
+        session.replaceMessages(candidate, { alreadyPersisted: true })
+      } catch (error) {
+        // Rename may already have happened (e.g. directory fsync failed). Restore
+        // the authoritative live history before allowing any later append.
+        const restore = session.getMessages().slice()
+        restoredRevision = rewriteRevision
+        try { await persist.compactOaiAsync(restore, true) } catch (restoreError) { writeFailure ??= restoreError }
+        throw error
+      } finally {
+        rewriteActive = false
+        if (rewriteRevision !== restoredRevision) {
+          // A late hook during rollback is buffered too. Queue one full snapshot,
+          // not duplicate appends that may already be present in the rollback.
+          const latest = session.getMessages().slice()
+          writeChain = writeChain.then(() => persist.compactOaiAsync(latest, true)).catch(err => { writeFailure ??= err })
+        }
+      }
+    })
+    // Keep the queue usable after a conflict; the caller still receives rejection.
+    writeChain = operation.catch(() => {})
+    return operation
+  }
+  return { commitCompaction, drain: async () => {
     await writeChain
     // P1 write-behind: drain must also flush the pending batch so /cd
     // migration, shutdown, and abort paths leave no unwritten tail.

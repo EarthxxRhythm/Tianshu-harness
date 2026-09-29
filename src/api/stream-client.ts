@@ -7,6 +7,9 @@ import type { ContentBlock, Usage } from './types.js'
  *  streamed reasoning; forensics had to reverse-engineer the loss from
  *  cache-log timestamp gaps. This event makes the discard observable. */
 export interface StreamAttemptAbortedInfo {
+  usage?: Partial<Usage>
+  requestId?: string
+  attemptId?: string
   provider: string
   /** Characters received before the abort (reasoning + text deltas). */
   receivedChars: number
@@ -17,6 +20,7 @@ export interface StreamAttemptAbortedInfo {
 }
 
 export interface StreamCallbacks {
+  onContextBudget?: (budget: import('../server/protocol.js').ContextBudgetSnapshot) => void
   /** Streaming text delta for live display */
   onTextDelta: (text: string) => void
   /** Streaming thinking delta for live display */
@@ -79,6 +83,8 @@ export interface WireDivergence {
 
 /** Canonical streaming interface shared by all provider clients */
 export interface StreamClient {
+  /** Pure preview of model-visible messages; never records a dispatch or mutates history. */
+  previewContextRequest?(request: OaiChatRequest): OaiChatRequest
   stream(request: OaiChatRequest, callbacks: StreamCallbacks, signal?: AbortSignal): Promise<void>
   /** Update reasoning effort at runtime (optional — not all providers support this) */
   setReasoningEffort?(effort: string): void

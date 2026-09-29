@@ -20,6 +20,7 @@ import { getGitChangeRate, smoothChangeRate } from './git-freshness.js'
 import { rejectOnAbort } from './turn-boundary-abort.js'
 import { abortableDelay } from '../api/retry-engine.js'
 import { classifyApiError } from '../api/error-classifier.js'
+import { canRecoverContextRejection } from './context-budget-preparation.js'
 import { RetryBudget } from '../api/retry-budget.js'
 import type { GoalContinuationController } from './goal-continuation.js'
 import type { PostTurnDecisionController } from './post-turn-decision.js'
@@ -53,6 +54,7 @@ export interface StreamTurnParams {
     /** 出网请求体触发体积护栏：历史工具输出被截断（这一轮模型看到的历史不完整），
      *  或已逼近传输上限（第三方中转常有更小的上限）。两者都必须可见（issue #94 同源教训）。 */
     onBodyGuard?: (info: BodyGuardNotice) => void
+    onContextBudget?: AgentCallbacks['onContextBudget']
     /** 网关拒收「历史缺 reasoning_content」，重试已改为保留思考内容重发（issue #258）。 */
     onReasoningEchoRecovered?: () => void
   }
@@ -177,6 +179,8 @@ export interface TurnOrchestratorDeps {
 
   // === Session ===
   removeLastMessage: () => void
+  preserveUserOnError?: () => boolean
+  recoverContextBudget?: () => Promise<boolean>
   addUserMessage: (content: string) => void
   appendSystemReminder: (content: string, cls?: SrClass) => void
   /** 同 appendSystemReminder，但返回 boolean 表示是否成功注入（未被 cap 拦截）。
@@ -499,6 +503,7 @@ export class TurnOrchestrator {
     const ruleTriggerCounts = new Map<string, number>()
     const disabledRulePatterns = new Set<string>()
     let lastInjectedReminder = ''
+    let contextRecoveryUsed = false
 
     // Whether a final (isFinal: true) turn completion was emitted. The turn
     // loop can exhaust maxTurns without ever reaching the text-only break
@@ -666,7 +671,7 @@ export class TurnOrchestrator {
           'build-request',
         )
         if (turnRequest.action === 'abort') return
-        const request = turnRequest.request!
+        let request = turnRequest.request!
 
         // Turn-level thinking (GLM): disable thinking on tool execution turns
         // to reduce reasoning_content accumulation. Plan Mode also disables
@@ -747,6 +752,7 @@ export class TurnOrchestrator {
               rateLimitOccurred = true
               rateLimitRetryMs = retryDelayMs ?? 0
             },
+            onContextBudget: callbacks.onContextBudget,
             onBodyGuard: (info) => {
               // 走相位通道（静态警告行）而不是塞进消息流：它既不是模型输出也不是
               // 用户输入，混进对话会污染前缀；相位只进 UI。
@@ -809,6 +815,20 @@ export class TurnOrchestrator {
         if (budgetHolder) budgetHolder.current = sharedBudget
         try {
           streamResult = await streamOnce()
+          if (!contextRecoveryUsed && request.contextBudget && this.deps.recoverContextBudget
+            && canRecoverContextRejection(streamResult.streamError,
+              this.deps.state.streamedText.length + streamResult.thinkingAccum.length,
+              streamResult.collectedBlocks.length)) {
+            contextRecoveryUsed = true
+            if (await this.deps.recoverContextBudget()) {
+              signal?.throwIfAborted()
+              const rebuilt = await this.deps.buildTurnRequest(turn, currentStrategy, currentSensorium, pressureResult, assistantResponded, true, callbacks)
+              if (rebuilt.action === 'abort') return
+              request = rebuilt.request!
+              userMessageConsumed = true
+              streamResult = await streamOnce()
+            }
+          }
 
           // 2D（默认关）：客户端重试耗尽后，agent 层有界重连。仅当本轮 streamError 被
           // classifyApiError 判为 shouldReconnect、非 AbortError、且未 abort 时触发。
@@ -953,7 +973,7 @@ export class TurnOrchestrator {
           // Abort is a user action, not a provider fault — don't cool the provider.
           if ((streamError as Error).name !== 'AbortError') this.deps.recordProviderOutcome(false)
           if (collectedBlocks.length > 0 && (streamError as Error).name !== 'AbortError') { this.deps.addAssistantBlocks(collectedBlocks); assistantResponded = true; turnTextPersisted = true }
-          if (!assistantResponded && !userMessageConsumed) this.deps.removeLastMessage()
+          if (!assistantResponded && !userMessageConsumed && !this.deps.preserveUserOnError?.()) this.deps.removeLastMessage()
           callbacks.onError(streamError)
           // 终态语义（2026-09-16 修复）：非 AbortError 的流错误终结本 run——server
           // 据此把会话终态记为 'interrupted'，而非等 run resolve 后被误标 'completed'。
@@ -1546,7 +1566,7 @@ export class TurnOrchestrator {
           partialText: turnTextPersisted ? '' : this.deps.state.streamedText,
         })
       } else {
-        if (!assistantResponded && !userMessageConsumed) this.deps.removeLastMessage()
+        if (!assistantResponded && !userMessageConsumed && !this.deps.preserveUserOnError?.()) this.deps.removeLastMessage()
         this.recordStop({
           source: 'stream-error',
           turn: this.deps.state.runLoopTurn,

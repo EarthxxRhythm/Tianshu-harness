@@ -150,10 +150,46 @@ export function resolveRunUnattended(task: Pick<ScheduledTask, 'reviewPolicy' | 
 export type TaskDueHandler = (prompt: string, allowedTools: string[], agentId?: string, meta?: TaskDueMeta) => Promise<unknown>
 export type UnsubscribeTaskDue = () => void
 
+/**
+ * issue #290 — 调度表写入所有权门。
+ *
+ * 多个 sidecar 指向同一 desktop 目录时，只有 CronLock 的持锁进程可以写
+ * scheduled_tasks.json。缺锁进程的 CronScheduler 内存表恒空，任何 add/
+ * remove/update 的 persist 都是「空表 + 本地改动 = 整表覆写」，会静默抹掉
+ * 锁主已落盘的任务；锁主下一次写盘又反向抹回（乒乓）。
+ *
+ * CronWiring 在拿到/竞争锁后把本门注入 scheduler；缺省未注入 = 单进程/
+ * 测试语义，保持原有可写行为不变。
+ */
+export interface CronSchedulerWriteGate {
+  canWrite(): boolean
+  /** Denial reason surfaced to HTTP/tool callers; 缺省用 generic 文案。 */
+  deniedReason?(): string | undefined
+}
+
+export const GENERIC_WRITE_DENIED_REASON =
+  '当前进程未持有调度器锁：定时任务写入由锁主进程受理，请在该实例的自动化面板操作，或稍后重试。'
+
+/** add/remove/update/runNow 在非锁主进程被拒时抛出，路由/工具据此回 503 或引导语。 */
+export class SchedulerWriteDeniedError extends Error {
+  readonly code = 'scheduler_not_owner'
+  constructor(message: string) {
+    super(message)
+    this.name = 'SchedulerWriteDeniedError'
+  }
+}
+
 export interface CronSchedulerConfig {
   schedulePath?: string
   tickIntervalMs?: number
   onCreateTask?: TaskDueHandler
+  /** Cross-process write ownership gate; absent = always writable. */
+  writeGate?: CronSchedulerWriteGate
+  /** Shorthand for a write gate whose only signal is canWrite/isOwner. */
+  canWrite?: () => boolean
+  isOwner?: () => boolean
+  writeDeniedReason?: () => string | undefined
+  deniedReason?: () => string | undefined
 }
 
 // ─── Persistence ──────────────────────────────────────────────
@@ -247,16 +283,47 @@ export class CronScheduler {
   private ticking = false
   /** 上次写盘结果（issue #266 / D5）——`ok=false` 必须能一路传到 HTTP 回执与界面。 */
   private persistState: Omit<PersistHealth, 'path'> = { ok: true }
+  private writeGate?: CronSchedulerWriteGate
 
   constructor(config: CronSchedulerConfig) {
     this.schedulePath = config.schedulePath ?? DEFAULT_SCHEDULE_PATH
     this.tickIntervalMs = config.tickIntervalMs ?? 30_000
+    const shorthandCanWrite = config.canWrite ?? config.isOwner
+    this.writeGate = config.writeGate ?? (shorthandCanWrite
+      ? { canWrite: shorthandCanWrite, deniedReason: config.writeDeniedReason ?? config.deniedReason }
+      : undefined)
     if (config.onCreateTask) this.handlers.add(config.onCreateTask)
+  }
+
+  // ─── Write ownership (issue #290) ──────────────────────────
+
+  /** Late-bind the lock-ownership gate (CronWiring does this after lock acquire). */
+  setWriteGate(gate?: CronSchedulerWriteGate): void {
+    this.writeGate = gate
+  }
+
+  /** True when this process may mutate/persist the schedule table. */
+  isWritable(): boolean {
+    return this.writeGate ? this.writeGate.canWrite() : true
+  }
+
+  /** Denial reason when another process owns the lock; undefined when writable. */
+  writeDeniedReason(): string | undefined {
+    if (this.isWritable()) return undefined
+    return this.writeGate?.deniedReason?.() ?? GENERIC_WRITE_DENIED_REASON
+  }
+
+  /** Fail closed before any mutation so a non-owner can never persist an empty
+   *  table over the lock owner's definitions (issue #290). */
+  private ensureWritable(): void {
+    const reason = this.writeDeniedReason()
+    if (reason) throw new SchedulerWriteDeniedError(reason)
   }
 
   // ─── Schedule Management ──────────────────────────────────
 
   add(task: ScheduledTask): void {
+    this.ensureWritable()
     const normalized = normalizeScheduledTask(task)
     if (!normalized) throw new Error(`Invalid scheduled task: ${task.id}`)
     validateTriggerOrThrow(normalized.trigger)
@@ -272,6 +339,7 @@ export class CronScheduler {
   }
 
   remove(id: string): boolean {
+    this.ensureWritable()
     const before = this.table.length
     this.table = this.table.filter(t => t.id !== id)
     if (this.table.length === before) return false
@@ -295,6 +363,7 @@ export class CronScheduler {
    * `stopped` 只改状态，定义仍在 `list()` 里、历史仍可按 scheduledTaskId 查。
    */
   setStatus(id: string, status: ScheduledTaskStatus): boolean {
+    this.ensureWritable()
     const normalized = normalizeTaskStatus(status)
     if (!normalized) return false
     let found = false
@@ -315,6 +384,7 @@ export class CronScheduler {
    * trigger 非法时抛错（与创建同口径，由路由转 400）；任务不存在返回 null。
    */
   update(id: string, patch: ScheduledTaskPatch): ScheduledTask | null {
+    this.ensureWritable()
     const current = this.table.find(t => t.id === id)
     if (!current) return null
     const next = applyTaskPatch(cloneTask(current), patch)
@@ -347,6 +417,7 @@ export class CronScheduler {
    * 返回 false = 任务不存在或已暂停。
    */
   runNow(id: string): boolean {
+    this.ensureWritable()
     const task = this.table.find(t => t.id === id)
     if (!task || !isFiringStatus(resolveTaskStatus(task))) return false
     const updated: ScheduledTask = {
@@ -371,6 +442,10 @@ export class CronScheduler {
     triggerType: CronTriggerType,
     specMatch?: { spec?: string },
   ): number {
+    // 事件触发不写定义本身；非锁主内存表恒空 → 恒 fired=0、不落盘（公开仓
+    // PR #295 的口径）。这里返回 0 而非抛错，避免锁丢失后 watcher/路由回调
+    // 把 SchedulerWriteDeniedError 抛进事件循环；真正会改表的路径仍 ensureWritable。
+    if (!this.isWritable()) return 0
     if (!EVENT_TRIGGER_TYPES.has(triggerType)) return 0
     let fired = 0
     for (const task of [...this.table]) {
@@ -398,8 +473,16 @@ export class CronScheduler {
 
   // ─── Lifecycle ─────────────────────────────────────────────
 
-  start(): void {
-    if (this.running) return
+  /**
+   * Merge the persisted table into memory without starting the timer. Split
+   * out of start() so CronWiring can load the disk definitions synchronously
+   * right after winning the lock, before its first await — otherwise a write
+   * arriving during recovery would persist an empty table over the file
+   * (issue #290 owner-side variant of the same clobber window).
+   * Idempotent: tasks already in memory are not duplicated.
+   */
+  load(): void {
+    this.ensureWritable()
     const persisted = loadSchedule(this.schedulePath)
     const existingIds = new Set(this.table.map(t => t.id))
     for (const task of persisted) {
@@ -408,6 +491,11 @@ export class CronScheduler {
         existingIds.add(task.id)
       }
     }
+  }
+
+  start(): void {
+    if (this.running) return
+    this.load()
     this.running = true
     this.tickTimer = setInterval(() => {
       this.tick(Date.now()).catch(err => {
@@ -529,6 +617,16 @@ export class CronScheduler {
    */
   private persist(): PersistOutcome {
     const at = Date.now()
+    // Defense in depth (issue #290): even if a mutator raced a lock loss, the
+    // non-owner must not write its (empty) table over the lock owner's file.
+    const denied = this.writeDeniedReason()
+    if (denied) {
+      this.persistState.lastAttemptAt = at
+      this.persistState.ok = false
+      this.persistState.lastError = denied
+      serverLogger.warn('Refusing schedule persist: scheduler lock not held', { schedulePath: this.schedulePath, reason: denied })
+      return { ok: false, error: denied }
+    }
     this.persistState.lastAttemptAt = at
     try {
       atomicWriteSchedule(this.schedulePath, this.table)
@@ -689,3 +787,9 @@ export function setUnattendedAutomationGate(gate: (() => boolean) | undefined): 
 export function isUnattendedAutomationAllowed(): boolean {
   return unattendedAutomationGate === undefined || unattendedAutomationGate()
 }
+
+/**
+ * issue #290 / PR #295 —— 全局写门拆到 schedule-write-guard.ts（cron-scheduler
+ * 逼近 800 行红线），此处 re-export 保持既有 import 路径不变。
+ */
+export { setScheduleWriteGuard, isScheduleWriteAllowed } from './schedule-write-guard.js'
