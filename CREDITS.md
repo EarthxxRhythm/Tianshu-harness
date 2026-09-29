@@ -321,3 +321,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #270 fix(scripts): 安装/构建链的 spawn 补 windowsHide——消除无控制台宿主下的闪窗（CLOSED）
 - #268 docs(readme): 补 CVM 拦截台账查看路径——入门路径第 4 步闭环（issue #250）（OPEN）
 - #267 fix(scripts): 注入点申报表在 CRLF 检出下误报——windows-smoke job 长期红的根因（CLOSED）
+- #299 feat(cache): billedHitRate 接进 /cache 面板——侧路劣化时账单口径可见（CLOSED）
