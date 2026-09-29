@@ -333,3 +333,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：KhalilYamber <220773268+KhalilYamber@users.noreply.github.com>
 
 - #301 feat(plugin): 新增 tianshu-imbridge —— 手机 QQ 与天枢双向直连（CLOSED）
+- #307 fix: Windows 平台测试失败面收口——EPERM 清理竞态/平台路径断言/时序竞态/迁移备份静默失效（第二批，承接 #306）（CLOSED）
