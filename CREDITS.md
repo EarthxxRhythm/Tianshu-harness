@@ -315,3 +315,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #297 docs: 新增 tianshu-mcp 操作手册（CLOSED）
 - #283 fix(config): 删掉示例配置与四语 README 里 schema 不认的 cache 旋钮 + 键存在性守卫（issue #282）（CLOSED）
 - #281 fix(platform): 加密连接扫描探测的厂商清单不再被展示上限吞掉（issue #280）（CLOSED）
+- #279 fix(release): package.json 对齐已发布的 3.26.0 + 版本源一致性守卫（OPEN）
