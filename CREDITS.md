@@ -301,3 +301,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：googio <59339358+googio@users.noreply.github.com>
 
 - #277 feat(search): add Serply web search backend（OPEN）
+
+## @JakcyLin
+
+署名：JakcyLin <11270821+JakcyLin@users.noreply.github.com>
+
+- #273 docs: 新增 Windows 卡巴斯基拦截桌面端 sidecar（PDM:Trojan.Win32.Generic）根因分析与规避方案（CLOSED）
