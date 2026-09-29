@@ -307,3 +307,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：JakcyLin <11270821+JakcyLin@users.noreply.github.com>
 
 - #273 docs: 新增 Windows 卡巴斯基拦截桌面端 sidecar（PDM:Trojan.Win32.Generic）根因分析与规避方案（CLOSED）
+
+## @lanlan0811
+
+署名：lanlan0811 <258210638+lanlan0811@users.noreply.github.com>
+
+- #297 docs: 新增 tianshu-mcp 操作手册（CLOSED）
