@@ -277,7 +277,7 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 
 署名：elysia395 <182482545+elysia395@users.noreply.github.com>
 
-- #271 docs: 补充 dsh-wallpaper-engine 上游署名与 MIT 声明（agent 自定义壁纸功能）（OPEN）
+- #271 docs: 补充 dsh-wallpaper-engine 上游署名与 MIT 声明（agent 自定义壁纸功能）（CLOSED）
 
 ## @YV3507
 
