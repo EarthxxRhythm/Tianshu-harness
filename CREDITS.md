@@ -335,3 +335,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #301 feat(plugin): 新增 tianshu-imbridge —— 手机 QQ 与天枢双向直连（CLOSED）
 - #307 fix: Windows 平台测试失败面收口——EPERM 清理竞态/平台路径断言/时序竞态/迁移备份静默失效（第二批，承接 #306）（CLOSED）
 - #305 fix(tui): 终端文本契约补裸 CR 与 C1 剥除——再入丢行/行缓冲上界/writeBatch 旁路一并收口（CLOSED）
+- #304 fix(cli+auth): 二次 Ctrl+C 强退保险丝 / OAuth 拒存 undefined 凭据 / 过期刷新并发去重（CLOSED）
