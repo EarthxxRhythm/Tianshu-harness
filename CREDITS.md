@@ -319,3 +319,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #298 fix(agent): CJK 近重复收敛修复 + 沿接缝拆出重复度度量族（解开 #287 修复撞 max-lines ratchet 的死锁）（OPEN）
 - #276 test(server): 钉住 adopt 会话首次打开回放完整历史（issue #274）（OPEN）
 - #270 fix(scripts): 安装/构建链的 spawn 补 windowsHide——消除无控制台宿主下的闪窗（CLOSED）
+- #268 docs(readme): 补 CVM 拦截台账查看路径——入门路径第 4 步闭环（issue #250）（OPEN）
