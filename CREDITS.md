@@ -325,3 +325,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #295 fix(server): 调度表写操作加锁主校验——非锁主进程建/删任务整表覆写 scheduled_tasks.json（issue #290）（OPEN）
 - #294 fix(tools): web-search 相关性 CJK bigram 词元补小写归一——「K线 均线」整批误判跑题（issue #289）（OPEN）
 - #293 fix(platform): 加密连接扫描改 X509 解析后匹配 subject——厂商正则扫整段 PEM 生产恒 0 命中（issue #288）（OPEN）
+- #292 fix(agent): 收敛检测对中文近重复输出改 n-gram 相似度——CJK 无空格整段一词致 Jaccard=0、双熔断同盲（issue #287）（OPEN）
