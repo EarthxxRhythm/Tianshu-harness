@@ -324,3 +324,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #299 feat(cache): billedHitRate 接进 /cache 面板——侧路劣化时账单口径可见（CLOSED）
 - #295 fix(server): 调度表写操作加锁主校验——非锁主进程建/删任务整表覆写 scheduled_tasks.json（issue #290）（OPEN）
 - #294 fix(tools): web-search 相关性 CJK bigram 词元补小写归一——「K线 均线」整批误判跑题（issue #289）（OPEN）
+- #293 fix(platform): 加密连接扫描改 X509 解析后匹配 subject——厂商正则扫整段 PEM 生产恒 0 命中（issue #288）（OPEN）
