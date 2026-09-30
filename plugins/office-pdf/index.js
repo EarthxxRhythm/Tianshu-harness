@@ -1,4 +1,4 @@
-// office-pdf: Native PDF generation (pdfkit) + text extraction (pdf-parse)
+// office-pdf: Native PDF generation (pdfkit) + text extraction (pdfjs-dist)
 // Replaces the browser-print HTML fallback (create_pdf).
 
 import { writeFileSync, renameSync, readFileSync, existsSync } from 'node:fs'
