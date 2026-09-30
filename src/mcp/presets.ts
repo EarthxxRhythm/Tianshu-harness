@@ -57,9 +57,55 @@ export interface McpPreset {
   /** Upstream repository URL — rendered as the card's "repository" entry. */
   repoUrl?: string
   docsUrl?: string
+  /** 按需启用：卡片上打一个显式标记，告诉用户这一条不是开箱即用的默认项。
+   *  语义与 McpSettings 的 opt-in 一致——列出预设不写任何配置、不拉起进程，
+   *  只有用户点「启用」才写入 config 并启动（测试见 mcp-presets.test.ts 的
+   *  「默认关闭：列出预设不写 config」）。 */
+  optIn?: boolean
 }
 
 export const MCP_PRESETS: McpPreset[] = [
+  // 排首位（2026-09-30）：天枢官方 MCP 是三端 Agent「开发 → 验收 → 返修」闭环的
+  // 主入口，值得占发现页第一屏；但它是**按需启用**的（optIn）——列卡片不写配置、
+  // 不拉进程，用户点「启用」才生效。
+  {
+    id: 'tianshu-mcp',
+    name: 'Tianshu MCP',
+    description: '天枢官方 MCP server —— 调度 TraeWork / ZCode / Codex 三个桌面端 Agent 完成「开发 → 验收 → 失败返修 → 再验收」闭环（run_task / verify_task / rework_task 等 9 个工具）。默认关闭：点「启用」才会写入配置并拉起进程，首次 npx 拉包可能需要数十秒。',
+    category: 'dev',
+    transport: 'stdio',
+    // 走 npx 分发（与生态其余预设一致）：零前置即可试用。若握手超时，
+    // 可改为「全局安装直调」——`npm install -g tianshu-mcp` 后把 command
+    // 填成 `tianshu-mcp`、args 清空（上游 issue #145 记录了两条已知坑：
+    // npx 冷启动超窗、内置 node-runtime 的 npx 重写）。
+    // 实测（macOS / node 24.18，经 createTransport 与 McpManager 两条真实链路）：
+    // 握手 6537ms（首次含拉包）/ 1554ms（npm 缓存后），工具面 9 个注册为
+    // mcp__tianshu-mcp__*，state=connected。也就是说 issue #72 的「npx 超窗」
+    // 与本仓当前默认不符——启动窗口早已放宽到 60s（transport-factory.ts 的
+    // DEFAULT_MCP_TIMEOUT_MS），6.5s 离上限很远。
+    // 复核入口（探针是一次性的，数字靠这两条命令现取）：
+    //   RIVET_MCP_LIVE=1 npm exec -- tsx --test src/server/__tests__/mcp-presets.test.ts
+    //   npm exec -- tsx scripts/smoke-mcp-presets.ts --only tianshu-mcp   # 真实握手 + 工具面
+    // 握手毫秒数随机器与 npm 缓存浮动，看的是「能不能连上、工具面覆盖声明」。
+    // 2026-09-14 冒烟复跑：工具面已是 11 个（该包在持续升版，上面那个 9 是当时的
+    // 快照）。expectedTools 列的 9 个仍全部返回——它是代表性列举，不是全集。
+    command: 'npx',
+    args: ['-y', 'tianshu-mcp'],
+    expectedTools: [
+      'run_task',
+      'continue_task',
+      'query_task',
+      'list_tasks',
+      'get_task_report',
+      'cancel_task',
+      'verify_task',
+      'rework_task',
+      'get_profiles',
+    ],
+    author: { name: 'lanlan0811', url: 'https://github.com/lanlan0811' },
+    repoUrl: 'https://github.com/lanlan0811/tianshu-mcp',
+    optIn: true,
+  },
   {
     id: 'context7',
     name: 'Context7',
@@ -148,20 +194,6 @@ export const MCP_PRESETS: McpPreset[] = [
     docsUrl: 'https://github.com/isaacphi/mcp-gdrive',
   },
   {
-    id: 'ms365',
-    name: 'Microsoft 365',
-    description: 'Outlook 邮件 / 日历 / OneDrive / Excel / Teams —— 经 Graph API 接入 Microsoft 365。首次使用需终端执行 npx @softeria/ms-365-mcp-server --login 完成设备码登录（组织账户加 --org-mode）',
-    category: 'productivity',
-    transport: 'stdio',
-    command: 'npx',
-    args: ['-y', '@softeria/ms-365-mcp-server'],
-    // 2026-09-14 冒烟实测：原列的三项里 `download-onedrive-file-content` 已不存在
-    // （该 server 升版后 OneDrive 一族换成 search-onedrive-files / download-bytes-to-file），
-    // 换成实际返回的代表项；前两项 list-mail-messages / list-calendar-events 仍在。
-    expectedTools: ['list-mail-messages', 'list-calendar-events', 'search-onedrive-files'],
-    docsUrl: 'https://github.com/Softeria/ms-365-mcp-server',
-  },
-  {
     id: 'linear',
     name: 'Linear',
     description: '管理 Linear issues / 项目 —— agent 可创建、更新、检索任务',
@@ -175,43 +207,6 @@ export const MCP_PRESETS: McpPreset[] = [
     ],
     expectedTools: ['list_issues', 'create_issue', 'update_issue'],
     docsUrl: 'https://github.com/jerhadf/linear-mcp-server',
-  },
-  {
-    id: 'tianshu-mcp',
-    name: 'Tianshu MCP',
-    description: '天枢官方 MCP server —— 调度 TraeWork / ZCode / Codex 三个桌面端 Agent 完成「开发 → 验收 → 失败返修 → 再验收」闭环（run_task / verify_task / rework_task 等 9 个工具）。默认关闭：点「启用」才会写入配置并拉起进程，首次 npx 拉包可能需要数十秒。',
-    category: 'dev',
-    transport: 'stdio',
-    // 走 npx 分发（与生态其余预设一致）：零前置即可试用。若握手超时，
-    // 可改为「全局安装直调」——`npm install -g tianshu-mcp` 后把 command
-    // 填成 `tianshu-mcp`、args 清空（上游 issue #145 记录了两条已知坑：
-    // npx 冷启动超窗、内置 node-runtime 的 npx 重写）。
-    // 实测（macOS / node 24.18，经 createTransport 与 McpManager 两条真实链路）：
-    // 握手 6537ms（首次含拉包）/ 1554ms（npm 缓存后），工具面 9 个注册为
-    // mcp__tianshu-mcp__*，state=connected。也就是说 issue #72 的「npx 超窗」
-    // 与本仓当前默认不符——启动窗口早已放宽到 60s（transport-factory.ts 的
-    // DEFAULT_MCP_TIMEOUT_MS），6.5s 离上限很远。
-    // 复核入口（探针是一次性的，数字靠这两条命令现取）：
-    //   RIVET_MCP_LIVE=1 npm exec -- tsx --test src/server/__tests__/mcp-presets.test.ts
-    //   npm exec -- tsx scripts/smoke-mcp-presets.ts --only tianshu-mcp   # 真实握手 + 工具面
-    // 握手毫秒数随机器与 npm 缓存浮动，看的是「能不能连上、工具面覆盖声明」。
-    // 2026-09-14 冒烟复跑：工具面已是 11 个（该包在持续升版，上面那个 9 是当时的
-    // 快照）。expectedTools 列的 9 个仍全部返回——它是代表性列举，不是全集。
-    command: 'npx',
-    args: ['-y', 'tianshu-mcp'],
-    expectedTools: [
-      'run_task',
-      'continue_task',
-      'query_task',
-      'list_tasks',
-      'get_task_report',
-      'cancel_task',
-      'verify_task',
-      'rework_task',
-      'get_profiles',
-    ],
-    author: { name: 'lanlan0811', url: 'https://github.com/lanlan0811' },
-    repoUrl: 'https://github.com/lanlan0811/tianshu-mcp',
   },
 ]
 
