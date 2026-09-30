@@ -40,7 +40,7 @@ describe('buildCognitiveFrameRecord / lite', () => {
   it('full 记录含 v/facts/quality/输出摘要；kind 正确', () => {
     const record = consistentRecord()
     assert.equal(record.kind, COGNITIVE_FRAME_KIND)
-    assert.equal(record.v, 1)
+    assert.equal(record.v, 2)
     assert.equal(record.facts.progress.todoCompletedDelta, 2)
     assert.equal(record.quality.efe, 'measured')
     assert.equal(record.structureFlow?.mode, 'flow')
@@ -131,7 +131,7 @@ describe('replayCognitiveFrames', () => {
 
   it('未知 schema 版本 → divergence(v)，不猜语义', () => {
     const record = consistentRecord()
-    ;(record as { v: number }).v = 2
+    ;(record as { v: number }).v = 99
     const report = replayCognitiveFrames([record])
     assert.ok(report.divergences.some(d => d.field === 'v'))
   })

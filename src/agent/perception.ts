@@ -1,3 +1,4 @@
+import { recentVerification } from './verification-activity.js'
 import type { ReasoningEffort } from './auto-reasoning.js'
 import type { Sensorium, StrategyProfile } from './sensorium.js'
 import type { StarPhaseContext } from './star-event.js'
@@ -8,6 +9,8 @@ export interface StarPhaseContextInput {
   turn: number
   maxTurns: number
   recentTools: string[]
+  recentToolHistory?: import('../prompt/volatile.js').ToolHistoryEntry[]
+  modelTurn?: number
   hasEnteredHighComplexity: boolean
   /** 交付证据门（evidence.deliveryStatus === 'verified'）——YOLO 无最终轮，
    *  归航改由交付证据抬升（2026-07-25 复盘修复）。 */
@@ -90,7 +93,9 @@ export function buildStarPhaseContext(input: StarPhaseContextInput): StarPhaseCo
   return {
     turn: input.turn,
     isWriting: input.recentTools.some(t => t === 'write_file' || t === 'edit_file'),
-    isRunningTests: input.recentTools.some(t => t === 'run_tests'),
+    isRunningTests: input.recentToolHistory !== undefined
+      ? !!recentVerification(input.recentToolHistory, input.modelTurn ?? input.turn)
+      : input.recentTools.some(t => t === 'run_tests'),
     // maxTurns<=0 是 YOLO 的「无上限」哨兵（turn-orchestrator 解释为
     // MAX_SAFE_INTEGER）——无上限就没有最终轮，否则 turn >= -1 恒真，
     // momentum>0.8 的帧会全数落进「瑶光归航」，把无限轮次的会话一路当成收尾。

@@ -90,25 +90,25 @@ describe('AdvisoryBus', () => {
 describe('W2 efficacy 负反馈环 (incident 20b9714e)', () => {
   /** 模拟真实接线：render 送达后 delivered++（AdvisoryReadback.track 的会话统计半边） */
   function makeStatsHarness(bus: AdvisoryBus) {
-    const stats = new Map<string, { delivered: number; adopted: number }>()
+    const stats = new Map<string, { delivered: number; adopted: number; decided?: number }>()
     bus.setEfficacyStatsProvider(key => stats.get(key) ?? null)
     const trackDelivered = () => {
       for (const d of bus.drainDelivered()) {
-        const s = stats.get(d.key) ?? { delivered: 0, adopted: 0 }
-        s.delivered++
+        const s = stats.get(d.key) ?? { delivered: 0, adopted: 0, decided: 0 }
+        s.delivered++; s.decided = (s.decided ?? 0) + 1
         stats.set(d.key, s)
       }
     }
     return { stats, trackDelivered }
   }
 
-  it('zero-adoption key: cooldown doubles from the 4th delivery, session-silenced after the 6th', () => {
+  it('zero-adoption key: cooldown doubles from the 4th delivery, bounded mute after six decisions then probation', () => {
     const bus = new AdvisoryBus()
     const { trackDelivered } = makeStatsHarness(bus)
 
     const deliveredAtCycle: number[] = []
     for (let cycle = 1; cycle <= 32; cycle++) {
-      bus.submit({ key: 'convergence', priority: 0.65, category: 'discipline', content: '请收敛' })
+      bus.submit({ key: 'convergence', priority: 0.65, category: 'discipline', content: '请收敛', expect: { kind: 'verify_attempted' } })
       const out = bus.render(undefined, cycle)
       if (out.includes('key="convergence"')) deliveredAtCycle.push(cycle)
       trackDelivered()
@@ -116,11 +116,11 @@ describe('W2 efficacy 负反馈环 (incident 20b9714e)', () => {
 
     // 前 3 次无阻拦；第 4 次起进入冷却翻倍;delivered 到 6 后本会话静默。
     assert.deepEqual(deliveredAtCycle.slice(0, 3), [1, 2, 3], 'first three deliveries unthrottled')
-    assert.equal(deliveredAtCycle.length, 6, `delivered cap must be 6, got ${deliveredAtCycle.length} at ${deliveredAtCycle}`)
+    assert.ok(deliveredAtCycle.length > 6, 'mute expires and permits probation')
     const gap45 = deliveredAtCycle[4]! - deliveredAtCycle[3]!
     const gap56 = deliveredAtCycle[5]! - deliveredAtCycle[4]!
     assert.ok(gap56 > gap45, `cooldown must double between deliveries: gaps ${gap45} → ${gap56}`)
-    assert.ok(bus.isEfficacySilenced('convergence'), 'key must be session-silenced after 6 zero-adoption deliveries')
+    assert.ok(deliveredAtCycle[6]! - deliveredAtCycle[5]! >= 10, 'probation waits for the bounded mute window')
   })
 
   it('adopted key is never throttled or silenced', () => {

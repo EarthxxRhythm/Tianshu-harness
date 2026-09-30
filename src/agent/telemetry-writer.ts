@@ -50,6 +50,7 @@ export const MERIDIAN_INDEX_ITEM_TIMEOUT_KIND = 'meridian-index-item-timeout'
 
 /** RIVET_DEBUG_TELEMETRY 未开时仍放行的轻量 kind 白名单（每条单行 <200B）。 */
 const LITE_KINDS: ReadonlySet<string> = new Set([
+  'phase-source',
   VITALS_LITE_KIND,
   PERF_SUMMARY_KIND,
   COGNITIVE_FRAME_LITE_KIND,

@@ -1,3 +1,4 @@
+import { sessionStateAdvice } from './runtime-advice-facts.js'
 /**
  * Multi-Signal Convergence Detector
  *
@@ -13,7 +14,8 @@ import type { EvidenceState } from './evidence.js'
 
 // ─── Types ──────────────────────────────────────────────────────────
 
-export type PhaseClass = 'explore' | 'plan' | 'execute' | 'verify' | 'deliver'
+import type { PhaseClass } from './phase-class.js'
+export type { PhaseClass } from './phase-class.js'
 
 export interface ConvergenceInput {
   /** Current turn number (0-based from AgentLoop) */
@@ -78,6 +80,7 @@ export interface ConvergenceInput {
   /** W3：会话活动模式（classifyActivityMode 的结果，由调用方传入）。
    *  diagnostic 时收敛文案分流为"先核实断言再收束"。 */
   activityMode?: ActivityMode
+  runtimeAdvice?: string
   /** Turns since current phaseClass was set. 1 = first turn in this phase.
    *  Used to suppress productive-stagnation during the cooling period after
    *  a phase transition. When absent, defaults to Infinity (no cooldown —
@@ -857,6 +860,7 @@ function buildInjectedMessage(
   productiveStagnation?: boolean,
   repeatCount?: number,
   activityMode?: ActivityMode,
+  runtimeAdvice?: string,
 ): string {
   const lines: string[] = []
 
@@ -971,7 +975,7 @@ function buildInjectedMessage(
     lines.push('')
     lines.push('- 把准备写进结论的关键断言用工具核实（ls/grep/read 实际文件），核实完再收束')
     lines.push('- 没有工具证据支撑的推断必须标注"未核实"，不要写成事实')
-    lines.push('- 会话自身状态（上下文占用/缓存命中/信号台账）可用 session_vitals 工具取证，不要凭感觉描述')
+    lines.push(runtimeAdvice ?? sessionStateAdvice())
     return lines.join('\n')
   }
 
@@ -1274,7 +1278,7 @@ export function evaluateConvergence(input: ConvergenceInput): ConvergenceResult 
   const shouldForceSplit = level >= 3 && !noToolForceAbort
   const shouldKick = level >= 2
   const injectedMessage = (level >= 2)
-    ? buildInjectedMessage(level as 2 | 3, score, signals, input.phaseClass, tier, input.evidenceState.deliveryStatus, noToolCount, productiveStagnation, input.repeatCount, input.activityMode)
+    ? buildInjectedMessage(level as 2 | 3, score, signals, input.phaseClass, tier, input.evidenceState.deliveryStatus, noToolCount, productiveStagnation, input.repeatCount, input.activityMode, input.runtimeAdvice)
     : null
 
   return {

@@ -40,7 +40,18 @@ await mkdir(PROJECT_TMP, { recursive: true })
 // `scripts/` 也要收：打包裁剪（wasm 白名单 / typescript 瘦身 / 外来平台包过滤）与
 // 遥测探针的测试都住在那儿。曾经只 glob `src/`，那 4 个文件写了却从不执行——
 // 裁剪逻辑错了会直接毁发布产物，恰恰是最需要门禁的一类。
-const TEST_GLOBS = ['src/**/*.test.ts', 'scripts/**/*.test.ts']
+//
+// `plugins/` 同理（2026-09-30 补）：示例插件是公开卖点之一，`plugins/*/test/` 下的
+// 验证资产此前同样从不执行（tianshu-imbridge 的 14 个文件 / 285 条，在 macOS 上的
+// 8 条平台耦合失败因此长期无人发现）。只收 `*.test.mjs`——node:test 标准形态、
+// 零外部依赖。
+//
+// **不收** `plugins/*/test/smoke.mjs`：那是各 office 插件自带的冒烟脚本（自定义
+// check() + 计数、`process.exit(failed?1:0)`），依赖插件自己的 node_modules
+// （docx / pdfkit / pptxgenjs / mammoth），入口是插件 package.json 的 `npm test`
+// （`cd plugins/<name> && npm ci && npm test`）。纳入本 runner 会让未装插件依赖的
+// 环境（公开仓 CI）恒红——宁可不收，也不收一个必然红的门禁。
+const TEST_GLOBS = ['src/**/*.test.ts', 'scripts/**/*.test.ts', 'plugins/**/*.test.mjs']
 
 const files: string[] = []
 for await (const file of glob(TEST_GLOBS)) {

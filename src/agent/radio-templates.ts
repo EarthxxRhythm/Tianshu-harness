@@ -155,7 +155,8 @@ function basename(path: string): string {
 
 // ── Phase class type (shared with star-event.ts) ───────────────────
 
-export type PhaseClass = 'explore' | 'plan' | 'execute' | 'verify' | 'deliver'
+import type { PhaseClass } from './phase-class.js'
+export type { PhaseClass } from './phase-class.js'
 
 // ── Heartbeat message formatter ────────────────────────────────────
 

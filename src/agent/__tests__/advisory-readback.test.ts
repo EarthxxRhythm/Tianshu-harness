@@ -272,7 +272,7 @@ describe('AdvisoryBus 习惯化对抗（P1b）', () => {
 
   it('streak >= 2：升级措辞 — 条目前标注连续未执行次数', () => {
     const bus = busWithStreak({ k: 2 })
-    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', content: '先验证再继续' })
+    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', expect: { kind: 'verify_attempted' }, content: '先验证再继续' })
     const out = bus.render()
     assert.ok(out.includes('已连续 2 次未见执行'), `expected escalation prefix, got: ${out}`)
     assert.ok(out.includes('先验证再继续'), '原文保留')
@@ -283,23 +283,23 @@ describe('AdvisoryBus 习惯化对抗（P1b）', () => {
     const bus = busWithStreak(streaks)
 
     // 第 1 次渲染:触发静音（本轮即被过滤）
-    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', content: 'x' })
+    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', expect: { kind: 'verify_attempted' }, content: 'x' })
     assert.ok(!bus.render().includes('key="k"'), '静音起始轮被过滤')
 
     // 静音期内持续投递,持续被过滤（HABITUATION_SILENCE_RENDERS=4,起始轮算第 1 个）
     for (let i = 0; i < 3; i++) {
-      bus.submit({ key: 'k', priority: 0.6, category: 'discipline', content: 'x' })
+      bus.submit({ key: 'k', priority: 0.6, category: 'discipline', expect: { kind: 'verify_attempted' }, content: 'x' })
       assert.ok(!bus.render().includes('key="k"'), `静音期第 ${i + 2} 轮仍被过滤`)
     }
 
     // 期满 probation:同 streak 不再触发新静音 → 放行（带升级措辞）
-    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', content: 'x' })
+    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', expect: { kind: 'verify_attempted' }, content: 'x' })
     const out = bus.render()
     assert.ok(out.includes('key="k"'), `probation 轮应放行,got: ${out}`)
 
     // streak 加深（放行后又被忽略）→ 再次静音
     streaks.k = 4
-    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', content: 'x' })
+    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', expect: { kind: 'verify_attempted' }, content: 'x' })
     assert.ok(!bus.render().includes('key="k"'), 'streak 加深触发新一轮静音')
   })
 
@@ -316,7 +316,7 @@ describe('AdvisoryBus 习惯化对抗（P1b）', () => {
 
   it('静音丢弃计入投递账本（不静默消失）', () => {
     const bus = busWithStreak({ k: 3 })
-    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', content: 'x' })
+    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', expect: { kind: 'verify_attempted' }, content: 'x' })
     bus.render()
     const ledger = bus.drainLedger()
     assert.ok(ledger.droppedKeys.includes('k'), `dropped keys 应含被静音的 k,got: ${JSON.stringify(ledger.droppedKeys)}`)
@@ -324,7 +324,7 @@ describe('AdvisoryBus 习惯化对抗（P1b）', () => {
 
   it('无 habituation policy 时行为不变（向后兼容）', () => {
     const bus = new AdvisoryBus()
-    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', content: 'plain' })
+    bus.submit({ key: 'k', priority: 0.6, category: 'discipline', expect: { kind: 'verify_attempted' }, content: 'plain' })
     const out = bus.render()
     assert.ok(out.includes('plain'))
     assert.ok(!out.includes('未见执行'))

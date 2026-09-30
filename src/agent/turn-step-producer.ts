@@ -1,3 +1,4 @@
+import { getTodos } from '../tools/todo.js'
 import type { AgentLoop } from './loop.js'
 import type { AgentCallbacks } from './loop-types.js'
 import type { OaiChatRequest } from '../api/oai-types.js'
@@ -101,16 +102,8 @@ export function isDocOrConfigOnly(targets: string[]): boolean {
 }
 
 /** Map StarPhase values to PromptEngine phaseClass strings. */
-export const PHASE_CLASS_MAP: Record<string, string> = {
-  'tianshu-planning': 'plan',
-  'tianxuan-locating': 'explore',
-  'tianji-decomposing': 'plan',
-  'tianquan-contracting': 'plan',
-  'yuheng-implementing': 'execute',
-  'kaiyang-testing': 'verify',
-  'yaoguang-delivering': 'deliver',
-  'tianshu-encore': 'plan',
-}
+import { PHASE_CLASS_MAP } from './phase-class.js'
+export { PHASE_CLASS_MAP } from './phase-class.js'
 
 /**
  * Turn-step producer (loop.ts terminal-wave extraction): the prompt-assembly
@@ -297,6 +290,14 @@ export class TurnStepProducer {
       }
     } else if (!this.self.taskContract || this.self.taskContract.status === 'ready_to_deliver') {
       this.self.taskContract = undefined
+    }
+
+    if (turnMode !== 'followUp') {
+      this.self.todoTaskContext = { key: this.self.todoTaskContext.key + 1, startTurn: this.self.modelObservationTurn + 1,
+        initialSignature: JSON.stringify((this.self.config.getTodos ?? getTodos)()),
+        multiStep: turnMode === 'task' && (Boolean(this.self.activePlanFilePath)
+          || (this.self.taskContract?.successCriteria.length ?? 0) >= 3
+          || (userInput.match(/^\s*\d+[.)、]\s*\S/gm)?.length ?? 0) >= 3) }
     }
 
     // 收口：intent 分类（网络等待）与 worktree 检测（git 子进程）并行等待——
@@ -681,14 +682,11 @@ export class TurnStepProducer {
     }
 
     // P1a 核销闭环：把本轮实际送达的条目（含 expect 谓词）交给 readback 跟踪。
-    // 必须与 runtime hook snapshot 使用同一 session turn 时钟；这里的 `turn` 是
-    // TurnOrchestrator.run 局部序号，而 postTool/postTurn 观察事件使用 session
-    // turn。混用会让 B2 在局部 turn=13 送达、事件却落在 session turn=2，
-    // course_changed 永远无法核销。
+    // 投递、观察、响应完成都使用跨用户请求单调递增的 modelObservationTurn。
     // 控制面 tee（Wave 2）：单次 drain → 不可变快照 → 多路分发。readback 与
     // control adapter 消费同一快照；adapter 绝不自行 drain（一次性消费边界）。
     const deliveredSnapshot = this.self.advisoryBus.drainDelivered()
-    this.self.advisoryReadback.track(deliveredSnapshot, this.self.session.getTurnCount())
+    this.self.advisoryReadback.track(deliveredSnapshot, this.self.modelObservationTurn)
     this.self.controlPlane.submitAll(signalsFromDelivered(deliveredSnapshot))
 
     // Phase 0 观测：advisory 投递账本落盘（仅有活动时写，避免遥测噪音），
@@ -1026,6 +1024,7 @@ export class TurnStepProducer {
     phaseClass: string
     pressureResult: import('../context/pressure-monitor.js').PressureResult
   }> {
+    this.self.modelObservationTurn++
     // ── StarFlow v2: Sensorium computation ──
     const pressureResult = this.self.pressureMonitor.check(estTokens, this.self.session.getTurnCount())
     if (this.lastTurnMode === 'chat') {
@@ -1046,6 +1045,7 @@ export class TurnStepProducer {
 
     const _tb = Date.now()
     const perceptionResult = await this.self.perception.perceive({
+      modelTurn: this.self.modelObservationTurn,
       turn,
       estimatedTokens: estTokens,
       pressureResult,

@@ -1,3 +1,4 @@
+import { verificationAttempted } from '../verification-activity.js'
 /**
  * Advisory-Readback Hook — advisory 采纳核销的运行时接线（P1a）。
  *
@@ -56,8 +57,9 @@ export function createAdvisoryReadbackHooks(
     name: 'advisory-readback-observe',
     run(ctx: RuntimeHookContext, tool: RuntimeToolEvent): void {
       deps.readback.observeTool({
-        turn: ctx.snapshot.turn,
+        turn: (ctx.snapshot.modelTurn ?? ctx.snapshot.turn),
         name: tool.name,
+        verificationAttempted: verificationAttempted(tool.name, tool.input),
         target: extractObservedTarget(tool),
         isError: tool.isError ?? !tool.success,
       })
@@ -68,7 +70,8 @@ export function createAdvisoryReadbackHooks(
     phase: 'postTurn',
     name: 'advisory-readback-evaluate',
     run(ctx: RuntimeHookContext): void {
-      const decided = deps.readback.evaluate(ctx.snapshot.turn)
+      const decided = deps.readback.evaluate((ctx.snapshot.modelTurn ?? ctx.snapshot.turn))
+      for (const pending of deps.readback.drainUnresolved()) deps.writeTelemetry?.({ kind: ADVISORY_UNRESOLVED_KIND, ...pending })
       if (decided === 0) return
       const outcomes = deps.readback.drainOutcomes()
       for (const o of outcomes) {
@@ -84,7 +87,7 @@ export function createAdvisoryReadbackHooks(
     phase: 'postSession',
     name: 'advisory-readback-finalize',
     run(ctx: RuntimeHookContext): void {
-      const { decided, unresolved } = deps.readback.flushAtSessionEnd(ctx.snapshot.turn)
+      const { decided, unresolved } = deps.readback.flushAtSessionEnd((ctx.snapshot.modelTurn ?? ctx.snapshot.turn))
       if (decided > 0) {
         for (const o of deps.readback.drainOutcomes()) {
           deps.writeTelemetry?.({ kind: o.shadow ? ADVISORY_HOLDOUT_KIND : ADVISORY_OUTCOME_KIND, ...o })
@@ -101,10 +104,11 @@ export function createAdvisoryReadbackHooks(
       }
       deps.writeTelemetry?.({
         kind: ADVISORY_UNRESOLVED_KIND,
-        turn: ctx.snapshot.turn,
+        turn: (ctx.snapshot.modelTurn ?? ctx.snapshot.turn),
         count: unresolved.length,
         maxTurnsShort,
         byKey,
+        deliveries: unresolved,
       })
     },
   }

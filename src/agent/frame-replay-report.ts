@@ -68,6 +68,7 @@ export interface AdmissionReport {
   sessionCount: number
   recordCount: number
   parseWarnings: number
+  palStates: Record<string, number>
   /** 关键 source（efe/sensorium）质量不足的记录数与占比。 */
   degradedCount: number
   degradedRatio: number
@@ -112,6 +113,7 @@ export function buildAdmissionReport(
     sessionCount: sessions.length,
     recordCount: allRecords.length,
     parseWarnings,
+    palStates: allRecords.reduce<Record<string, number>>((counts, r) => { const state = r.v === 1 ? 'legacy_unknown' : r.facts.palStatus?.state ?? 'error'; counts[state] = (counts[state] ?? 0) + 1; return counts }, {}),
     degradedCount: replay.degradedTurns.length,
     degradedRatio: allRecords.length === 0 ? 0 : replay.degradedTurns.length / allRecords.length,
     replay,

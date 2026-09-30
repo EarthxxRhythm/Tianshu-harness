@@ -90,7 +90,8 @@ describe('TurnPerceptionController', () => {
     assert.equal(reasoningEffort, 'high')
     assert.equal(result.event.phase, 'tianji-decomposing')
     assert.deepEqual(phases, ['tianji-decomposing'])
-    assert.equal(snapshots.length, 1)
+    assert.equal(snapshots.length, 2)
+    assert.ok(snapshots.some(s => (s as { kind?: string }).kind === 'phase-source'))
     assert.equal(controller.getSnapshots().length, 1)
   })
 
@@ -154,5 +155,28 @@ describe('TurnPerceptionController', () => {
 
     assert.equal(controller.getSnapshots().length, 100)
     assert.equal(controller.getSnapshots()[0]!.turn, 6)
+  })
+})
+
+describe('verification activity production perception', () => {
+  it('propagates current/previous model-turn tests into phase and command-free telemetry, then expires', async () => {
+    const records: Array<Record<string, unknown>> = []
+    const controller = new TurnPerceptionController({
+      cwd: '/tmp/project', maxTurns: 100, runtimeHooks: new RuntimeHookPipeline([{ phase: 'preTurn', name: 'fixture', run: ctx => {
+        ctx.effects.setSensorium({ momentum: 0.1, pressure: 0.2, confidence: 0.9, complexity: 0.2, freshness: 0.5, stability: 1 })
+        ctx.effects.setStrategy({ reasoningEffort: 'high', explorationBreadth: 0.3, commitThreshold: 0.6, shouldEscalate: false, thetaCycleInterval: 3 })
+      } }]),
+      telemetryWriter: { write: row => { records.push({ ...row }) }, flush: async () => {} },
+      getRuntimeSnapshot: extra => ({ cwd: '/tmp/project', turn: 1, recentToolHistory: [], sensorium: null, strategy: null, vigor: null, gitChangeRate: 0, season: null, ...extra }),
+      getProviderDegradationRatio: () => 0, addUserMessage: () => {}, requestThetaCheck: () => {},
+      setReasoningEffort: () => {}, getFingerprint: () => fingerprint(),
+    })
+    const input = { ...makeInput(), modelTurn: 42, recentToolHistory: [{ tool: 'bash', status: 'failed' as const, target: 'private command omitted', verificationAttempted: true, modelTurn: 41 }] }
+    assert.equal((await controller.perceive(input, { emitPhaseChange: () => {} })).event.phase, 'kaiyang-testing')
+    const phase = records.find(r => r.kind === 'phase-source')!
+    assert.equal(phase.source, 'verification-activity')
+    assert.equal(phase.observedTurn, 41)
+    assert.ok(!JSON.stringify(phase).includes('private command'))
+    assert.notEqual((await controller.perceive({ ...input, modelTurn: 43 }, { emitPhaseChange: () => {} })).event.phase, 'kaiyang-testing')
   })
 })

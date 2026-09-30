@@ -1,3 +1,4 @@
+import { budget, facts } from './advice-facts-fixture.js'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { AdvisoryBus } from '../advisory-bus.js'
@@ -31,7 +32,8 @@ describe('createContextPressureHook', () => {
     let call = 0
     const hook = createContextPressureHook({
       advisoryBus: bus,
-      getEstimatedTokens: () => Math.round((ratios[Math.min(call++, ratios.length - 1)] ?? 0) * 100_000),
+      getEstimatedTokens: () => 0,
+      adviceFacts: facts(() => budget({ inputTokens: Math.round((ratios[Math.min(call++, ratios.length - 1)] ?? 0) * 100_000), inputBudget: 100_000 })),
       getContextWindow: () => 100_000,
     })
     return { bus, hook }
@@ -73,7 +75,8 @@ describe('createContextPressureHook', () => {
     let call = 0
     const hook = createContextPressureHook({
       advisoryBus: bus,
-      getEstimatedTokens: () => Math.round(ratios[Math.min(call++, ratios.length - 1)]! * 100_000),
+      getEstimatedTokens: () => 0,
+      adviceFacts: facts(() => budget({ inputTokens: Math.round(ratios[Math.min(call++, ratios.length - 1)]! * 100_000), inputBudget: 100_000 })),
       getContextWindow: () => 100_000,
     })
     hook.run(makeCtx(1))
@@ -82,7 +85,7 @@ describe('createContextPressureHook', () => {
     hook.run(makeCtx(2))
     const second = bus.render(undefined, 2)
     assert.match(second, /跨越 86% 阈值/)
-    assert.match(second, /立即收束/)
+    assert.match(second, /预算协调器/)
   })
 
   // ── A4 收束 vs 续轮互斥合并：活跃 goal/义务在场时改发"先核销再收束" ──
@@ -91,13 +94,14 @@ describe('createContextPressureHook', () => {
     const bus = new AdvisoryBus()
     const hook = createContextPressureHook({
       advisoryBus: bus,
-      getEstimatedTokens: () => 90_000,
+      getEstimatedTokens: () => 0,
+      adviceFacts: facts(() => budget({ inputTokens: 90_000, inputBudget: 100_000 })),
       getContextWindow: () => 100_000,
       hasActiveContinuation: () => true,
     })
     hook.run(makeCtx(1))
     const out = bus.render()
-    assert.match(out, /核销/, '合并文案必须包含"先核销"指引')
+    assert.match(out, /核对当前目标和未完成义务/, '保留当前目标约束')
     assert.doesNotMatch(out, /立即收束当前子任务/, '不再发与 goal continuation 打架的裸收束指令')
   })
 
@@ -105,12 +109,13 @@ describe('createContextPressureHook', () => {
     const bus = new AdvisoryBus()
     const hook = createContextPressureHook({
       advisoryBus: bus,
-      getEstimatedTokens: () => 90_000,
+      getEstimatedTokens: () => 0,
+      adviceFacts: facts(() => budget({ inputTokens: 90_000, inputBudget: 100_000 })),
       getContextWindow: () => 100_000,
       hasActiveContinuation: () => false,
     })
     hook.run(makeCtx(1))
-    assert.match(bus.render(), /立即收束当前子任务/)
+    assert.match(bus.render(), /核对剩余工作/)
   })
 
   it('re-arms after the ratio drops below threshold - hysteresis (compact happened)', () => {
@@ -119,7 +124,8 @@ describe('createContextPressureHook', () => {
     let call = 0
     const hook = createContextPressureHook({
       advisoryBus: bus,
-      getEstimatedTokens: () => Math.round(ratios[Math.min(call++, ratios.length - 1)]! * 100_000),
+      getEstimatedTokens: () => 0,
+      adviceFacts: facts(() => budget({ inputTokens: Math.round(ratios[Math.min(call++, ratios.length - 1)]! * 100_000), inputBudget: 100_000 })),
       getContextWindow: () => 100_000,
     })
     hook.run(makeCtx(1))

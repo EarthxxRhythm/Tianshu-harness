@@ -92,6 +92,8 @@ import type { PhysarumShadowStats } from '../repo/physarum-shadow-stats.js'
 import { createProblemAttackHooks, palMode } from './hooks/problem-attack-hook.js'
 
 export interface RuntimeHookDeps {
+  getTodoTask?: () => { key: number; multiStep: boolean; startTurn?: number; initialSignature?: string }
+  adviceFacts?: import('./runtime-advice-facts.js').RuntimeAdviceFacts
   stigmergyDeposit: (deposit: any) => Promise<void>
   stigmergyQuery: () => Promise<any>
   getEvidenceState: () => EvidenceState
@@ -873,6 +875,7 @@ export function createDefaultRuntimeHooks(deps: RuntimeHookDeps): RuntimeHook[] 
   // a new session before the 86% split threshold triggers.
   if (deps.advisoryBus && deps.getEstimatedTokens && deps.getContextWindow) {
     hooks.push(createContextPressureHook({
+      adviceFacts: deps.adviceFacts,
       advisoryBus: deps.advisoryBus,
       getEstimatedTokens: deps.getEstimatedTokens,
       getContextWindow: deps.getContextWindow,
@@ -899,6 +902,7 @@ export function createDefaultRuntimeHooks(deps: RuntimeHookDeps): RuntimeHook[] 
   if (deps.advisoryBus && deps.getStreamedText && deps.getEstimatedTokens && deps.getContextWindow
     && process.env.RIVET_WRAPUP_ANXIETY_GUARD !== '0') {
     hooks.push(createWrapupAnxietyGuardHook({
+      adviceFacts: deps.adviceFacts,
       advisoryBus: deps.advisoryBus,
       getStreamedText: deps.getStreamedText,
       getEstimatedTokens: deps.getEstimatedTokens,
@@ -946,7 +950,7 @@ export function createDefaultRuntimeHooks(deps: RuntimeHookDeps): RuntimeHook[] 
   // when a multi-step task is running without one, and (b) refresh a stale list.
   // Soft by default, escalates wording when a long task still has no todo.
   if (deps.advisoryBus) {
-    hooks.push(createTodoReminderHook({ advisoryBus: deps.advisoryBus, getTodos: deps.getTodos }))
+    hooks.push(createTodoReminderHook({ advisoryBus: deps.advisoryBus, getTodos: deps.getTodos, getTask: deps.getTodoTask, getActiveToolNames: deps.adviceFacts?.getActiveToolNames }))
   }
 
   // Background-jobs awareness — preTurn nudge while jobs run (requires bus + registry).

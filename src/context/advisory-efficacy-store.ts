@@ -36,6 +36,7 @@ export interface EfficacyPrior {
   ignored: number
   shadowHeld: number
   shadowSatisfied: number
+  shadowDecided?: number
   updatedAt: number
 }
 
@@ -46,9 +47,10 @@ export interface EfficacyDelta {
   ignored: number
   shadowHeld: number
   shadowSatisfied: number
+  shadowDecided?: number
 }
 
-const COUNTER_FIELDS = ['delivered', 'adopted', 'ignored', 'shadowHeld', 'shadowSatisfied'] as const
+const COUNTER_FIELDS = ['delivered', 'adopted', 'ignored', 'shadowHeld', 'shadowSatisfied', 'shadowDecided'] as const
 
 function decayFactor(ageMs: number): number {
   if (ageMs <= 0) return 1
@@ -103,6 +105,7 @@ function parseFile(path: string): Map<string, EfficacyPrior> {
         ignored: Number(p.ignored) || 0,
         shadowHeld: Number(p.shadowHeld) || 0,
         shadowSatisfied: Number(p.shadowSatisfied) || 0,
+        ...(typeof p.shadowDecided === 'number' ? { shadowDecided: p.shadowDecided } : {}),
         updatedAt: p.updatedAt,
       })
     } catch { /* skip malformed lines */ }
@@ -119,6 +122,7 @@ function decayed(prior: EfficacyPrior, now: number): EfficacyPrior {
     ignored: prior.ignored * f,
     shadowHeld: prior.shadowHeld * f,
     shadowSatisfied: prior.shadowSatisfied * f,
+    ...(prior.shadowDecided !== undefined ? { shadowDecided: prior.shadowDecided * f } : {}),
     updatedAt: now,
   }
 }
@@ -128,7 +132,7 @@ export class AdvisoryEfficacyStore {
   private readonly path: string
   private readonly lockPath: string
 
-  constructor(cwd: string) {
+  constructor(cwd: string, private profile?: 'main' | 'worker') {
     this.dir = join(cwd, '.rivet', 'knowledge')
     this.path = join(this.dir, 'advisory-efficacy.jsonl')
     this.lockPath = join(this.dir, 'advisory-efficacy.jsonl.lock')
@@ -139,8 +143,10 @@ export class AdvisoryEfficacyStore {
     const out = new Map<string, EfficacyPrior>()
     for (const [key, prior] of parseFile(this.path)) {
       const d = decayed(prior, now)
-      if (COUNTER_FIELDS.every(f => d[f] < PRUNE_THRESHOLD)) continue
-      out.set(key, d)
+      if (COUNTER_FIELDS.every(f => (d[f] ?? 0) < PRUNE_THRESHOLD)) continue
+      const prefix = this.profile ? `v2:${this.profile}:` : ''
+      if (prefix && (!key.startsWith(prefix) || d.shadowDecided === undefined)) continue
+      out.set(prefix ? key.slice(prefix.length) : key, d)
     }
     return out
   }
@@ -153,7 +159,7 @@ export class AdvisoryEfficacyStore {
   mergeAndSave(deltas: ReadonlyMap<string, EfficacyDelta>, now = Date.now()): void {
     let hasChange = false
     for (const d of deltas.values()) {
-      if (COUNTER_FIELDS.some(f => d[f] > 0)) { hasChange = true; break }
+      if (COUNTER_FIELDS.some(f => (d[f] ?? 0) > 0)) { hasChange = true; break }
     }
     if (!hasChange) return
 
@@ -164,14 +170,18 @@ export class AdvisoryEfficacyStore {
       for (const [key, prior] of parseFile(this.path)) {
         merged.set(key, decayed(prior, now))
       }
-      for (const [key, delta] of deltas) {
+      for (const [rawKey, delta] of deltas) {
+        const key = this.profile ? `v2:${this.profile}:${rawKey}` : rawKey
         const base = merged.get(key) ?? { key, delivered: 0, adopted: 0, ignored: 0, shadowHeld: 0, shadowSatisfied: 0, updatedAt: now }
-        for (const f of COUNTER_FIELDS) base[f] += delta[f]
+        for (const f of COUNTER_FIELDS) {
+          if (f === 'shadowDecided' && delta[f] === undefined) continue
+          base[f] = (base[f] ?? 0) + (delta[f] ?? 0)
+        }
         base.updatedAt = now
         merged.set(key, base)
       }
       const kept = [...merged.values()]
-        .filter(p => COUNTER_FIELDS.some(f => p[f] >= PRUNE_THRESHOLD))
+        .filter(p => COUNTER_FIELDS.some(f => (p[f] ?? 0) >= PRUNE_THRESHOLD))
         .sort((a, b) => (b.delivered + b.shadowHeld) - (a.delivered + a.shadowHeld))
         .slice(0, MAX_KEYS)
       const lines = kept.map(p => JSON.stringify({
@@ -181,6 +191,7 @@ export class AdvisoryEfficacyStore {
         ignored: round3(p.ignored),
         shadowHeld: round3(p.shadowHeld),
         shadowSatisfied: round3(p.shadowSatisfied),
+        ...(p.shadowDecided !== undefined ? { shadowDecided: round3(p.shadowDecided) } : {}),
         updatedAt: p.updatedAt,
       }))
       atomicWrite(this.path, this.dir, lines.join('\n') + (lines.length > 0 ? '\n' : ''))
