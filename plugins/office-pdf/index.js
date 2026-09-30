@@ -224,30 +224,40 @@ function drawTable(doc, block, applyBody) {
 // ── pdf_read ────────────────────────────────────────────────────
 
 async function extractPdfPages(filePath) {
-  const pdfParse = (await import('pdf-parse')).default
-  const buffer = readFileSync(filePath)
-  // pdf-parse's bundled pdf.js flakes with 'bad XRef entry' on the first
-  // parse(s) after an idle period — retry with a short backoff.
-  const pages = []
-  let lastErr
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await pdfParse(buffer, {
-        pagerender: async (pageData) => {
-          const t = await pageData.getTextContent()
-          const text = t.items.map(i => i.str).join(' ').trim()
-          pages.push({ page: pages.length + 1, text })
-          return text
-        },
-      })
-      return pages
-    } catch (err) {
-      pages.length = 0
-      lastErr = err
-      if (attempt < 2) await new Promise(r => setTimeout(r, 75 * (attempt + 1)))
+  // 解析层用 pdf.js 官方的 pdfjs-dist（legacy 构建，专为 Node/旧环境）。
+  //
+  // 这里换掉过 pdf-parse@1.1.4：它捆绑的 pdf.js 四个版本（v1.9.426 / v1.10.88 /
+  // v1.10.100 / v2.0.550）在 Node 24 下解析 pdfkit 生成的 PDF 会**概率性失败**
+  // （'bad XRef entry' / 'Invalid number: …'），同一份 buffer 反复读也会（实测：
+  // 有时第 1 次成功、有时第 3 次、也见过连续 15 次全失败）。四种手段逐一试过且
+  // 全部无效：重试次数（3→8→15）、退避时长（50ms→1s）、等待（0→3s）、解析器版本。
+  // 故这是解析层的兼容性问题，不是可调参修的——重试只会把不确定性往下游推。
+  //
+  // pdfjs-dist legacy 实测首次即稳定成功，因此本函数不再需要退避重试。
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const doc = await pdfjs.getDocument({
+    data: new Uint8Array(readFileSync(filePath)),
+    // Node 环境：不通过 fetch 取 worker/CMap（没有这个网络面），标准字体数据也不
+    // 提供——纯文本提取不需要字形，缺它只会多一条无害 warning。
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    useSystemFonts: true,
+  }).promise
+  try {
+    const pages = []
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i)
+      const tc = await page.getTextContent()
+      // pdf.js 的 item 切分会把行内间距留在 str 里，再被 join(' ') 叠加成伪空格
+      // （实测 code 行读回成 'const   answer   =   42'，title 与 heading 之间也是双空格）。
+      // 折叠连续空白才是可读文本——注意 item 切分本就不保留缩进，折叠不损失更多信息。
+      const text = tc.items.map(it => it.str).join(' ').replace(/\s+/g, ' ').trim()
+      pages.push({ page: i, text })
     }
+    return pages
+  } finally {
+    await doc.destroy()
   }
-  throw lastErr
 }
 
 // ── Tool definitions ────────────────────────────────────────────

@@ -13,14 +13,24 @@
     "description": "Native PDF generation (text/headings/tables/lists, CJK fonts, page numbers) + text extraction for context reading",
     "entry": "index.js",
     "tools": [
-      { "name": "pdf_create", "description": "Generate a real PDF with text, headings, tables, and lists (CJK-aware, optional page numbers)" },
-      { "name": "pdf_read", "description": "Extract text content from a PDF file for context reading" }
+      {
+        "name": "pdf_create",
+        "description": "Generate a real PDF with text, headings, tables, and lists (CJK-aware, optional page numbers)"
+      },
+      {
+        "name": "pdf_read",
+        "description": "Extract text content from a PDF file for context reading"
+      }
     ],
-    "permissions": { "fs": true },
-    "skills": ["skills"]
+    "permissions": {
+      "fs": true
+    },
+    "skills": [
+      "skills"
+    ]
   },
   "dependencies": {
-    "pdfkit": "^0.15.0",
-    "pdf-parse": "^1.1.1"
+    "pdfjs-dist": "^4.10.38",
+    "pdfkit": "^0.15.0"
   }
 }
