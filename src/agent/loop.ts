@@ -1,6 +1,3 @@
-import { observePal } from './pal-observation.js'
-import { palMode } from './hooks/problem-attack-hook.js'
-import { sessionStateAdvice } from './runtime-advice-facts.js'
 import type { ToolHistoryEntry } from '../prompt/volatile.js'
 import { renderPlanExecutingBlock } from '../prompt/volatile.js'
 import type { KnowledgeCandidate } from '../memory/essence-gate.js'
@@ -238,8 +235,6 @@ export class AgentLoop {
   /** Obligation final gate 遥测（auto-continue 触发/误触发/诚实受阻计数，postSession 落 meta）。 */
   obligationGateStats = { continued: 0, misfires: 0, honestBlocked: 0, suppressed: 0 }
   compactFailures: CompactCircuitBreakerState = { consecutiveFailures: 0 }
-  todoTaskContext = { key: 0, multiStep: false, startTurn: 0, initialSignature: '[]' }
-  modelObservationTurn = 0
   recentToolHistory: ToolHistoryEntry[] = []
   /** Component C (typecheck-reminder): a .ts/.tsx file was written this session. */
   touchedTsFiles = false
@@ -482,14 +477,13 @@ export class AgentLoop {
           ignored: s.ignored - (base?.ignored ?? 0),
           shadowHeld: s.shadowHeld - (base?.shadowHeld ?? 0),
           shadowSatisfied: s.shadowSatisfied - (base?.shadowSatisfied ?? 0),
-          shadowDecided: (s.shadowDecided ?? 0) - (base?.shadowDecided ?? 0),
         }
-        if (delta.delivered > 0 || delta.adopted > 0 || delta.ignored > 0 || delta.shadowHeld > 0 || delta.shadowSatisfied > 0 || (delta.shadowDecided ?? 0) > 0) {
+        if (delta.delivered > 0 || delta.adopted > 0 || delta.ignored > 0 || delta.shadowHeld > 0 || delta.shadowSatisfied > 0) {
           deltas.set(key, delta)
         }
         this.lastEfficacyFlush.set(key, {
           delivered: s.delivered, adopted: s.adopted, ignored: s.ignored,
-          shadowHeld: s.shadowHeld, shadowSatisfied: s.shadowSatisfied, shadowDecided: s.shadowDecided,
+          shadowHeld: s.shadowHeld, shadowSatisfied: s.shadowSatisfied,
         })
       }
       if (deltas.size > 0) this.advisoryEfficacyStore.mergeAndSave(deltas)
@@ -808,24 +802,22 @@ export class AgentLoop {
     })
     // B 跨会话效能信息素：加载 EWMA 衰减后的先验（holdout 资格/副驾闸门/
     // Top-N 次级排序三个消费方;习惯化保持会话内,guardian meta 保持会话纯度）
-    const advisoryProfile = this.config.sessionId?.startsWith('worker-') ? 'worker' : 'main'
-    this.advisoryReadback.configure(advisoryProfile)
-    this.advisoryEfficacyStore = new AdvisoryEfficacyStore(this.cwd, advisoryProfile)
+    this.advisoryEfficacyStore = new AdvisoryEfficacyStore(this.cwd)
     try {
       const priors = this.advisoryEfficacyStore.load()
       this.advisoryReadback.seedPriors(
         [...priors].map(([k, p]) => [k, {
           delivered: p.delivered, adopted: p.adopted, ignored: p.ignored,
-          shadowHeld: p.shadowHeld, shadowSatisfied: p.shadowSatisfied, shadowDecided: p.shadowDecided, profile: advisoryProfile,
+          shadowHeld: p.shadowHeld, shadowSatisfied: p.shadowSatisfied,
         }] as [string, EfficacyPriorCounts]),
       )
     } catch { /* 先验加载失败不致命——回退冷启动 */ }
     this.advisoryBus.setAdoptionRateProvider(key => this.advisoryReadback.getAdoptionRate(key))
     // W2 efficacy 负反馈环（20b9714e）：发射前回读会话内 delivered/adopted——
-    // 同 key 零采纳判定 3 次后降频、6 次后有界静音（constitutional 豁免）。
+    // 同 key 零采纳连发 3 次后冷却翻倍、6 次后会话内静默（constitutional 豁免）。
     this.advisoryBus.setEfficacyStatsProvider(key => {
       const s = this.advisoryReadback.getStats().get(key)
-      return s ? { delivered: s.delivered, adopted: s.adopted, decided: s.adopted + s.ignored, pending: this.advisoryReadback.hasPending(key) } : null
+      return s ? { delivered: s.delivered, adopted: s.adopted } : null
     })
     // 星域措辞适配（2026-07-07）：按当前域把 advisory 翻译成该域听得进的
     // 形态（如天权的证据式裁决协议）。惰性读 sessionDomain——域激活/切换自动生效。
@@ -2829,7 +2821,7 @@ export class AgentLoop {
         sampleCount: beacon?.sampleCount ?? 0,
         requiredSamples: FLOW_MIN_SAMPLES,
       },
-      ...observePal(palMode(), this.getActiveToolNames().includes('attack_case'), () => this.problemAttack.snapshotForCvm()),
+      pal: this.problemAttack.snapshotForCvm(),
       evidence: {
         hasVerificationDebt,
         deliveryStatus: this.evidence.getState().deliveryStatus,
@@ -2945,7 +2937,6 @@ export class AgentLoop {
     const convergenceCheck = evaluateConvergence({
       turn,
       phaseClass: phaseClass as PhaseClass,
-      runtimeAdvice: sessionStateAdvice({ getActiveToolNames: () => this.getActiveToolNames(), getContextBudget: () => this.getContextBudget(), getModel: () => this.config.promptEngine.getModel() }),
       phaseRelativeTurn,
       scoreHistory: this.convergenceScoreHistory,
       contextWindow: this.config.contextWindow,

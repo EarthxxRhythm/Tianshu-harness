@@ -1,4 +1,3 @@
-import { recentVerification } from './verification-activity.js'
 import type { ToolHistoryEntry } from '../prompt/volatile.js'
 import type { PrefixFingerprint } from '../prompt/fingerprint.js'
 import type { Pheromone } from '../context/stigmergy.js'
@@ -34,7 +33,6 @@ export interface TurnPerceptionDeps {
 }
 
 export interface PerceptionInput {
-  modelTurn?: number
   turn: number
   estimatedTokens: number
   pressureResult: PressureResult
@@ -157,7 +155,6 @@ export class TurnPerceptionController {
       turn: input.turn,
       maxTurns: this.deps.maxTurns,
       recentTools,
-      recentToolHistory: input.recentToolHistory, modelTurn: input.modelTurn,
       hasEnteredHighComplexity: this.hasEnteredHighComplexity,
       // YOLO 证据门归航：buildStarPhaseContext 只在 maxTurns<=0 时消费。
       // 判据用 deliveryReady（最近验证 passed 且绿后零编辑）而非 deliveryStatus——
@@ -166,8 +163,6 @@ export class TurnPerceptionController {
     })
     const event = createStarEvent(nextSensorium, starCtx)
     this.currentPhase = event.phase
-    const verified = recentVerification(input.recentToolHistory, input.modelTurn ?? input.turn)
-    this.deps.telemetryWriter.write({ kind: 'phase-source', turn: input.modelTurn ?? input.turn, source: verified ? 'verification-activity' : 'sensorium', observedTurn: verified?.modelTurn, phase: event.phase })
     effects.emitPhaseChange(event.phase, {
       tool: event.glyph,
       suggestion: event.label,

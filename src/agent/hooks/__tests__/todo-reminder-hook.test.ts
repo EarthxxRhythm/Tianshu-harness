@@ -25,8 +25,6 @@ function setup(todos: () => TodoItem[]) {
   const hook = createTodoReminderHook({
     advisoryBus: { submit: (e: AdvisoryEntry) => { submitted.push(e) } },
     getTodos: todos,
-    getTask: () => ({ key: 1, multiStep: true, startTurn: 1 }),
-    getActiveToolNames: () => ['todo'],
   })
   return { hook, submitted }
 }
@@ -54,12 +52,12 @@ describe('createTodoReminderHook', () => {
     assert.deepEqual(submitted[0]!.expect, { kind: 'tool_appears', tools: ['todo'] }, 'adoption predicate attached')
   })
 
-  it('does not escalate priority merely because the task is long', () => {
+  it('escalates wording/priority when a long task still has no todo', () => {
     const { hook, submitted } = setup(() => [])
     hook.run(makeCtx(6))
     assert.equal(submitted.length, 1)
     assert.equal(submitted[0]!.key, 'todo-missing')
-    assert.equal(submitted[0]!.priority, 0.5)
+    assert.equal(submitted[0]!.priority, 0.7)
   })
 
   it('respects cooldown between reminders', () => {

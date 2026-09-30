@@ -1,4 +1,3 @@
-import { verificationAttempted } from './verification-activity.js'
 /**
  * Advisory Readback — advisory 采纳核销闭环（P1a, 2026-07-04 生命周期设计）。
  *
@@ -30,15 +29,12 @@ export interface ObservedToolEvent {
   /** bash → command;写/读类 → file_path;其余 → target 字段 */
   target: string
   isError: boolean
-  verificationAttempted?: boolean
 }
 
 export type AdvisoryOutcome = 'adopted' | 'ignored'
 
 /** 单次核销判定 — 供遥测落盘（kind: 'advisory-outcome';shadow 判定 kind: 'advisory-holdout'） */
 export interface AdvisoryOutcomeEvent {
-  deliveryId: string
-  profile: 'main' | 'worker'
   key: string
   outcome: AdvisoryOutcome
   expectKind: AdvisoryExpectation['kind']
@@ -54,9 +50,6 @@ export interface AdvisoryOutcomeEvent {
  * 说明的是「测不到」而不是「没效果」。
  */
 export interface UnresolvedExpectation {
-  deliveryId: string
-  profile: 'main' | 'worker'
-  reason: 'session_ended' | 'superseded' | 'contaminated'
   key: string
   expectKind: AdvisoryExpectation['kind']
   deliveredTurn: number
@@ -76,11 +69,9 @@ export interface AdvisoryKeyStats {
   shadowHeld: number
   /** 扣留期内 expect 谓词仍被自发满足的次数——"没提醒也会做"的基线 */
   shadowSatisfied: number
-  shadowDecided?: number
 }
 
 interface PendingExpectation {
-  deliveryId: string
   key: string
   expect: AdvisoryExpectation
   deliveredTurn: number
@@ -119,6 +110,11 @@ function courseSignature(e: ObservedToolEvent): string {
   return family === 'read' || family === 'edit' ? `${family}:${e.target}` : family
 }
 
+/** verify_attempted 认可的工具（与 self-verify/CCR 的 VERIFY 家族同源） */
+const VERIFY_TOOL_NAMES = new Set(['run_tests', 'typecheck', 'lsp_diagnostics'])
+/** bash 中的验证类命令（与 git-clear-after-fail 的 TEST_CMD_RE 同源） */
+const VERIFY_BASH_RE = /\b(test|vitest|jest|pytest|mocha|tsx\s+--test|npm\s+(run\s+)?(test|typecheck)|tsc\b)/i
+
 /** 观察日志保留的最大轮跨度 — pattern_absent 最长窗口 + 余量 */
 const EVENT_RETENTION_TURNS = 8
 
@@ -129,8 +125,6 @@ export interface EfficacyPriorCounts {
   ignored: number
   shadowHeld: number
   shadowSatisfied: number
-  shadowDecided?: number
-  profile?: 'main' | 'worker'
 }
 
 /** 先验对副驾闸门决出样本的贡献上限——防陈旧数据永久锁定闸门方向 */
@@ -143,25 +137,6 @@ export const MATURE_LIFT_MIN_SHADOW = 3
 
 export class AdvisoryReadback {
   private pending: PendingExpectation[] = []
-  private sequence = 0
-  private unresolved: UnresolvedExpectation[] = []
-  private completedTurns = new Set<number>()
-  private profile: 'main' | 'worker' = 'main'
-  private requireOpportunity = false
-  configure(profile: 'main' | 'worker'): void { this.profile = profile; this.requireOpportunity = true }
-  markResponseComplete(turn: number): void {
-    this.completedTurns.add(turn)
-    for (const t of this.completedTurns) if (t < turn - EVENT_RETENTION_TURNS) this.completedTurns.delete(t)
-  }
-  hasPending(key: string): boolean { return this.pending.some(p => p.key === key && !p.shadow) }
-  drainUnresolved(): UnresolvedExpectation[] { const out = this.unresolved; this.unresolved = []; return out }
-  private censor(p: PendingExpectation, turn: number, reason: UnresolvedExpectation['reason']): UnresolvedExpectation {
-    return { deliveryId: p.deliveryId, profile: this.profile, reason, key: p.key, expectKind: p.expect.kind,
-      deliveredTurn: p.deliveredTurn, turnsShort: Math.max(0, (p.expect.withinTurns ?? DEFAULT_WINDOW[p.expect.kind]) - this.opportunities(p, turn)), shadow: p.shadow }
-  }
-  private opportunities(p: PendingExpectation, turn: number): number {
-    return this.requireOpportunity ? [...this.completedTurns].filter(t => t >= p.deliveredTurn && t <= turn).length : turn - p.deliveredTurn + 1
-  }
   private events: ObservedToolEvent[] = []
   private stats = new Map<string, AdvisoryKeyStats>()
   private outcomes: AdvisoryOutcomeEvent[] = []
@@ -173,7 +148,7 @@ export class AdvisoryReadback {
 
   /** 注入跨会话先验(会话启动时一次)。 */
   seedPriors(priors: Iterable<[string, EfficacyPriorCounts]>): void {
-    this.priors = new Map([...priors].filter(([, p]) => p.profile === this.profile && p.shadowDecided !== undefined))
+    this.priors = new Map(priors)
   }
 
   /** 送达跟踪 — render 后调用。同 key 重复送达时重置观察窗口（不叠加 pending）。 */
@@ -186,15 +161,26 @@ export class AdvisoryReadback {
       if (!d.expect) continue
       const existing = this.pending.find(p => p.key === d.key)
       if (existing) {
-        this.unresolved.push(this.censor(existing, turn, existing.shadow === shadow ? 'superseded' : 'contaminated'))
-        this.pending = this.pending.filter(p => p !== existing)
-        // A held-out sample following a real delivery is contaminated too.
-        if (shadow && !existing.shadow) {
-          this.unresolved.push(this.censor({ key: d.key, expect: d.expect, deliveredTurn: turn, shadow, deliveryId: `${this.profile}:${++this.sequence}` }, turn, 'contaminated'))
+        if (existing.shadow === shadow) {
+          // 同组重复送达:刷新观察窗口
+          existing.expect = d.expect
+          existing.deliveredTurn = turn
           continue
         }
+        // shadow 状态翻转 = 反事实 trial 被污染,作废 shadow 一侧:
+        //   已有真实 pending + 新扣留 → 模型近期已见过提醒,扣留无对照价值;
+        //   已有 shadow pending + 新真实送达 → 扣留期被打断,基线测不成。
+        if (shadow) {
+          s.shadowHeld = Math.max(0, s.shadowHeld - 1)
+          continue // 保留真实 pending
+        }
+        s.shadowHeld = Math.max(0, s.shadowHeld - 1)
+        existing.expect = d.expect
+        existing.deliveredTurn = turn
+        existing.shadow = false
+        continue
       }
-      this.pending.push({ deliveryId: `${this.profile}:${++this.sequence}`, key: d.key, expect: d.expect, deliveredTurn: turn, shadow })
+      this.pending.push({ key: d.key, expect: d.expect, deliveredTurn: turn, shadow })
     }
   }
 
@@ -216,18 +202,18 @@ export class AdvisoryReadback {
 
     for (const p of this.pending) {
       const window = p.expect.withinTurns ?? DEFAULT_WINDOW[p.expect.kind]
-      const expired = this.opportunities(p, turn) >= window
+      const deadline = p.deliveredTurn + window - 1
 
       let outcome: AdvisoryOutcome | null = null
       if (p.expect.kind === 'pattern_absent') {
         // 负向谓词只在到期时判定——过早读文件会把"还没来得及清"误判为忽略
-        if (expired) {
+        if (turn >= deadline) {
           outcome = this.checkPatternAbsent(p.expect) ? 'adopted' : 'ignored'
         }
       } else {
         const satisfied = this.checkPositive(p.expect, p.deliveredTurn, turn)
         if (satisfied) outcome = 'adopted'
-        else if (expired) outcome = 'ignored'
+        else if (turn >= deadline) outcome = 'ignored'
       }
 
       if (outcome === null) {
@@ -238,7 +224,6 @@ export class AdvisoryReadback {
       const s = this.statsFor(p.key)
       if (p.shadow) {
         // 反事实组:只进 shadow 桶,不动 adopted/ignored/streak（不污染副驾闸门与习惯化）
-        s.shadowDecided = (s.shadowDecided ?? 0) + 1
         if (outcome === 'adopted') s.shadowSatisfied++
       } else if (outcome === 'adopted') {
         s.adopted++
@@ -248,7 +233,6 @@ export class AdvisoryReadback {
         s.ignoredStreak++
       }
       this.outcomes.push({
-        deliveryId: p.deliveryId, profile: this.profile,
         key: p.key,
         outcome,
         expectKind: p.expect.kind,
@@ -277,7 +261,16 @@ export class AdvisoryReadback {
    */
   flushAtSessionEnd(turn: number): { decided: number; unresolved: UnresolvedExpectation[] } {
     const decided = this.evaluate(turn)
-    const unresolved = [...this.drainUnresolved(), ...this.pending.map(p => this.censor(p, turn, 'session_ended'))]
+    const unresolved = this.pending.map(p => {
+      const window = p.expect.withinTurns ?? DEFAULT_WINDOW[p.expect.kind]
+      return {
+        key: p.key,
+        expectKind: p.expect.kind,
+        deliveredTurn: p.deliveredTurn,
+        turnsShort: Math.max(0, p.deliveredTurn + window - 1 - turn),
+        ...(p.shadow ? { shadow: true } : {}),
+      }
+    })
     this.pending = []
     return { decided, unresolved }
   }
@@ -336,8 +329,8 @@ export class AdvisoryReadback {
     const s = this.stats.get(key)
     if (!s) return null
     const decided = s.adopted + s.ignored
-    if (decided === 0 || (s.shadowDecided ?? 0) === 0) return null
-    return s.adopted / decided - s.shadowSatisfied / s.shadowDecided!
+    if (decided === 0 || s.shadowHeld === 0) return null
+    return s.adopted / decided - s.shadowSatisfied / s.shadowHeld
   }
 
   /**
@@ -351,11 +344,11 @@ export class AdvisoryReadback {
     const p = this.priors.get(key)
     const adopted = (s?.adopted ?? 0) + (p?.adopted ?? 0)
     const ignored = (s?.ignored ?? 0) + (p?.ignored ?? 0)
-    const shadowDecided = (s?.shadowDecided ?? 0) + (p?.shadowDecided ?? 0)
+    const shadowHeld = (s?.shadowHeld ?? 0) + (p?.shadowHeld ?? 0)
     const shadowSatisfied = (s?.shadowSatisfied ?? 0) + (p?.shadowSatisfied ?? 0)
     const decided = adopted + ignored
-    if (decided < MATURE_LIFT_MIN_DECIDED || shadowDecided < MATURE_LIFT_MIN_SHADOW) return null
-    return adopted / decided - shadowSatisfied / shadowDecided
+    if (decided < MATURE_LIFT_MIN_DECIDED || shadowHeld < MATURE_LIFT_MIN_SHADOW) return null
+    return adopted / decided - shadowSatisfied / shadowHeld
   }
 
   /**
@@ -423,14 +416,12 @@ export class AdvisoryReadback {
     this.stats.clear()
     this.outcomes = []
     this.priors.clear()
-    this.unresolved = []
-    this.completedTurns.clear()
   }
 
   private statsFor(key: string): AdvisoryKeyStats {
     let s = this.stats.get(key)
     if (!s) {
-      s = { delivered: 0, adopted: 0, ignored: 0, ignoredStreak: 0, shadowHeld: 0, shadowSatisfied: 0, shadowDecided: 0 }
+      s = { delivered: 0, adopted: 0, ignored: 0, ignoredStreak: 0, shadowHeld: 0, shadowSatisfied: 0 }
       this.stats.set(key, s)
     }
     return s
@@ -451,7 +442,8 @@ export class AdvisoryReadback {
         })
       case 'verify_attempted':
         return windowEvents.some(e =>
-          e.verificationAttempted ?? verificationAttempted(e.name, { command: e.target }),
+          VERIFY_TOOL_NAMES.has(e.name) ||
+          (e.name === 'bash' && VERIFY_BASH_RE.test(e.target)),
         )
       case 'file_touched':
         return windowEvents.some(e => expect.paths.some(p => e.target.includes(p)))

@@ -22,17 +22,18 @@
 import type { EFEComponents } from './prediction-error.js'
 import type { StructureFlowInputs } from './structure-flow-controller.js'
 
-import type { CognitiveFactQuality, CognitiveFactSource } from './cognitive-quality.js'
-export type { CognitiveFactQuality, CognitiveFactSource } from './cognitive-quality.js'
+export type CognitiveFactQuality = 'measured' | 'partial' | 'missing' | 'vacuous'
+
+export type CognitiveFactSource =
+  | 'efe' | 'sensorium' | 'flow' | 'pal' | 'evidence' | 'user' | 'plan' | 'progress'
 
 export interface CognitiveFrameFacts {
-  palStatus?: import('./pal-observation.js').PalStatus
   efe: EFEComponents | null
   /** Sensorium 原始快照三字段（与 P1 flowInputs 同口径）。 */
   sensorium: { momentum: number; momentumHasData: boolean; stability: number } | null
   /** P1 computeFlowBeacon 结果 + 资格门样本数（调用方已算好的派生事实）。 */
   flow: { score: number | null; sampleCount: number; requiredSamples: number }
-  /** PAL 只读事实；v2 空闲为零案件，v1 null 的历史原因未知。 */
+  /** ProblemAttackStore.snapshotForCvm() 的只读快照；无案件时 null。 */
   pal: { activeCases: number; anyNeedsUser: boolean; anyStalled: boolean; hasPlannedProbes: boolean } | null
   evidence: { hasVerificationDebt: boolean; deliveryStatus: string; consecutiveFailures: number }
   user: { intervened: boolean }
@@ -48,7 +49,7 @@ export interface CognitiveFrameInput extends CognitiveFrameFacts {
 
 export interface CognitiveFrame {
   /** 记录 schema 版本——遥测落盘后是跨版本资产。 */
-  v: 1 | 2
+  v: 1
   turn: number
   phaseClass: string
   facts: CognitiveFrameFacts
@@ -106,14 +107,13 @@ function flowQuality(f: CognitiveFrameFacts['flow']): CognitiveFactQuality {
 
 // ─── 装配器 ─────────────────────────────────────────────────────────
 
-export function assembleCognitiveFrame(input: CognitiveFrameInput, schemaVersion: 1 | 2 = 2): CognitiveFrame {
+export function assembleCognitiveFrame(input: CognitiveFrameInput): CognitiveFrame {
   // 深拷贝边界：调用方装配后修改输入不得影响 frame。
   const facts: CognitiveFrameFacts = {
     efe: input.efe ? { ...input.efe } : null,
     sensorium: input.sensorium ? { ...input.sensorium } : null,
     flow: { ...input.flow },
     pal: input.pal ? { ...input.pal } : null,
-    ...(schemaVersion === 2 && input.palStatus ? { palStatus: { ...input.palStatus } } : {}),
     evidence: { ...input.evidence },
     user: { ...input.user },
     plan: { ...input.plan },
@@ -124,8 +124,7 @@ export function assembleCognitiveFrame(input: CognitiveFrameInput, schemaVersion
     efe: efeQuality(facts.efe),
     sensorium: sensoriumQuality(facts.sensorium),
     flow: flowQuality(facts.flow),
-    pal: facts.palStatus && ['disabled', 'unavailable'].includes(facts.palStatus.state) ? 'not_applicable'
-      : facts.pal === null ? 'missing' : 'measured',
+    pal: facts.pal === null ? 'missing' : 'measured',
     // 布尔/计数事实来自始终存在的 tracker，恒为已知。
     evidence: 'measured',
     user: 'measured',
@@ -140,7 +139,7 @@ export function assembleCognitiveFrame(input: CognitiveFrameInput, schemaVersion
   }))
 
   return {
-    v: schemaVersion,
+    v: 1,
     turn: input.turn,
     phaseClass: input.phaseClass,
     facts,

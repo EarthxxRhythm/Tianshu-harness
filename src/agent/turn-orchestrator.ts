@@ -1,4 +1,3 @@
-import { sessionStateAdvice } from './runtime-advice-facts.js'
 import { formatBodyGuardNotice, type BodyGuardNotice } from '../api/request-body-guard.js'
 import type { AgentCallbacks } from './loop-types.js'
 import type { TurnHeartbeat } from './turn-heartbeat.js'
@@ -152,7 +151,6 @@ export interface TurnStateBag {
 // ── Deps interface ──
 
 export interface TurnOrchestratorDeps {
-  getRuntimeAdvice?: () => string
   // === Lifecycle ===
   initializeRun: (userInput: string, callbacks: AgentCallbacks, images?: string[]) => Promise<{
     heartbeat: TurnHeartbeat
@@ -1227,7 +1225,7 @@ export class TurnOrchestrator {
               const exploringDomain = starDomain !== null && ['tianji', 'tianxuan', 'pojun'].includes(starDomain)
               const effectiveDiagnostic = diagnostic || exploringDomain
               const content = effectiveDiagnostic
-                ? `本轮已进行 ${b2TurnLimit}+ 次 API 调用。先用工具核实你将要写进结论的关键断言（ls/grep/read 实际文件），核实完再收束；没有工具证据的推断必须标注"未核实"。${this.deps.getRuntimeAdvice?.() ?? sessionStateAdvice()}`
+                ? `本轮已进行 ${b2TurnLimit}+ 次 API 调用。先用工具核实你将要写进结论的关键断言（ls/grep/read 实际文件），核实完再收束；没有工具证据的推断必须标注"未核实"。会话自身状态可用 session_vitals 取证。`
                 : `本轮已进行 ${b2TurnLimit}+ 次 API 调用，请收敛当前动作并输出结论，不要继续发散。`
               if (this.deps.submitAdvisory) {
                 this.deps.submitAdvisory({

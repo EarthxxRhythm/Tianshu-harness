@@ -29,10 +29,9 @@ export interface RuntimeToolEvent {
 }
 
 export interface RuntimeHookSnapshot {
-  modelTurn?: number
   cwd: string
   turn: number
-  recentToolHistory: Array<Pick<ToolHistoryEntry, 'tool' | 'status' | 'target' | 'argsHash' | 'errorClass' | 'bashActivity' | 'verificationAttempted' | 'modelTurn'>>
+  recentToolHistory: Array<Pick<ToolHistoryEntry, 'tool' | 'status' | 'target' | 'argsHash' | 'errorClass' | 'bashActivity'>>
   sensorium: Sensorium | null
   sensoriumInput?: SensoriumInput
   providerDegradationRatio?: number

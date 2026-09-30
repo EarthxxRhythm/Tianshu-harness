@@ -1,5 +1,3 @@
-import { verificationAttempted, recentVerification } from '../verification-activity.js'
-import { PHASE_CLASS_MAP } from '../phase-class.js'
 /**
  * Tianshu Radio — Runtime hook for phase transition + milestone + stuck detection
  * + phase-aware heartbeat + domain voice.
@@ -35,6 +33,17 @@ const HEARTBEAT_INTERVAL = 6
 // Phase classification
 // ---------------------------------------------------------------------------
 
+const PHASE_CLASS_MAP: Record<StarPhase, PhaseClass> = {
+  'tianxuan-locating': 'explore',
+  'tianshu-planning': 'plan',
+  'tianshu-encore': 'plan',
+  'tianji-decomposing': 'plan',
+  'tianquan-contracting': 'plan',
+  'yuheng-implementing': 'execute',
+  'kaiyang-testing': 'verify',
+  'yaoguang-delivering': 'deliver',
+}
+
 function classifyPhase(phase: StarPhase): PhaseClass {
   return PHASE_CLASS_MAP[phase]
 }
@@ -47,6 +56,25 @@ function isWritingTool(name: string): boolean {
   return name === 'edit_file' || name === 'write_file'
 }
 
+/**
+ * Is the tool actually running tests (not merely targeting a test file)?
+ * Used for isRunningTests in StarPhaseContext — only checks tool name
+ * to avoid false positives like `bash` with target `npm test`.
+ */
+function isTestRunnerTool(name: string): boolean {
+  if (name === 'run_tests') return true
+  if (name.includes('test')) return true
+  return false
+}
+
+/**
+ * Is this a test-related tool (for milestone detection)?
+ * Also matches `bash` commands — the caller filters by success/failure.
+ */
+function isTestRelatedTool(name: string): boolean {
+  return name === 'bash' || isTestRunnerTool(name)
+}
+
 function buildStarPhaseContext(
   ctx: RuntimeHookContext,
   tool: RuntimeToolEvent,
@@ -55,7 +83,7 @@ function buildStarPhaseContext(
   return {
     turn: ctx.snapshot.turn,
     isWriting: isWritingTool(tool.name),
-    isRunningTests: verificationAttempted(tool.name, tool.input),
+    isRunningTests: isTestRunnerTool(tool.name),
     isFinalTurn: false, // Not determinable from single postTool hook
     hasEnteredHighComplexity,
   }
@@ -162,7 +190,7 @@ export function createRadioHook(deps?: RadioHookDeps): PostToolRuntimeHook {
           if (classifyPhase(mapSensoriumToPhase(snapshot.sensorium, {
             ...phaseCtx,
             isWriting: isWritingTool(entry.tool),
-            isRunningTests: !!recentVerification([entry], snapshot.modelTurn ?? snapshot.turn),
+            isRunningTests: isTestRunnerTool(entry.tool),
           })) === currentPhase) {
             consecutive++
           } else {
@@ -208,7 +236,7 @@ export function createRadioHook(deps?: RadioHookDeps): PostToolRuntimeHook {
       // 6. Test fail milestone (failed bash/test tool, with cooldown)
       if (
         !tool.success &&
-        verificationAttempted(tool.name, tool.input) &&
+        isTestRelatedTool(tool.name) &&
         turn - lastEmitTurn >= TEST_FAIL_COOLDOWN
       ) {
         const toolHistory = snapshot.recentToolHistory.map(e => ({
@@ -230,7 +258,7 @@ export function createRadioHook(deps?: RadioHookDeps): PostToolRuntimeHook {
       // 7. Test pass milestone (successful test tool in verify phase)
       if (
         tool.success &&
-        verificationAttempted(tool.name, tool.input) &&
+        isTestRunnerTool(tool.name) &&
         currentPhase === 'verify'
       ) {
         lastEmitTurn = turn

@@ -1,4 +1,3 @@
-import { budget, facts } from './advice-facts-fixture.js'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createWrapupAnxietyGuardHook, detectWrapupPhrase } from '../hooks/wrapup-anxiety-guard-hook.js'
@@ -20,7 +19,6 @@ function setup(opts: { text: string; estimated: number; window: number; withSr?:
     getStreamedText: () => opts.text,
     getEstimatedTokens: () => opts.estimated,
     getContextWindow: () => opts.window,
-    adviceFacts: facts(() => opts.estimated ? budget({ inputTokens: opts.estimated, inputBudget: opts.window }) : undefined),
     ...(opts.withSr ? { addSystemReminder: (content: string, cls?: string) => { reminders.push({ content, cls }) } } : {}),
   })
   return { submitted, reminders, run: (turn: number) => hook.run(makeCtx(turn)) }
@@ -116,7 +114,7 @@ describe('wrapup-anxiety-guard — 三段 ctxRatio 阈值', () => {
     const adv = h.submitted[0]!
     assert.equal(adv.key, 'wrapup-anxiety-guard')
     assert.ok(adv.content.includes('10%'), 'must cite the measured ratio')
-    assert.ok(adv.content.includes('输入预算'), 'must cite the window size')
+    assert.ok(adv.content.includes('1M'), 'must cite the window size')
     assert.ok(adv.content.includes('session_vitals'))
   })
 
@@ -160,7 +158,7 @@ describe('wrapup-anxiety-guard — 三段 ctxRatio 阈值', () => {
     assert.equal(h.reminders.length, 1)
     assert.equal(h.reminders[0]!.cls, 'functional', 'must bypass the 1-per-turn discipline cap')
     assert.ok(h.reminders[0]!.content.includes('10%'), 'SR cites the measured ratio')
-    assert.ok(h.reminders[0]!.content.includes('最近请求测量'))
+    assert.ok(h.reminders[0]!.content.includes('习惯性焦虑'))
   })
 
   it('functional SR respects the same cooldown latch', () => {

@@ -1,4 +1,3 @@
-import { QUALITY_ORDER, QUALITY_CODE } from './cognitive-quality.js'
 /**
  * P3 Wave 3：认知帧回放遥测——记录构造 + 确定性回放对账。
  *
@@ -37,7 +36,7 @@ export const COGNITIVE_FRAME_LITE_KIND = 'cognitive-frame-lite'
 // `{ kind: string } & Record<string, unknown>` 通道。
 export type CognitiveFrameRecord = {
   kind: typeof COGNITIVE_FRAME_KIND
-  v: 1 | 2
+  v: 1
   turn: number
   phaseClass: string
   inputFingerprint: string
@@ -55,7 +54,7 @@ export function buildCognitiveFrameRecord(
 ): CognitiveFrameRecord {
   return {
     kind: COGNITIVE_FRAME_KIND,
-    v: frame.v,
+    v: 1,
     turn: frame.turn,
     phaseClass: frame.phaseClass,
     inputFingerprint: frame.inputFingerprint,
@@ -77,9 +76,14 @@ export function buildCognitiveFrameRecord(
 }
 
 /** quality 压缩码：按固定 source 顺序，m=measured p=partial x=missing v=vacuous。 */
+const QUALITY_ORDER: readonly CognitiveFactSource[] =
+  ['efe', 'sensorium', 'flow', 'pal', 'evidence', 'user', 'plan', 'progress']
+const QUALITY_CODE: Record<CognitiveFactQuality, string> =
+  { measured: 'm', partial: 'p', missing: 'x', vacuous: 'v' }
+
 export type CognitiveFrameLiteRecord = {
   kind: typeof COGNITIVE_FRAME_LITE_KIND
-  v: 1 | 2
+  v: 1
   turn: number
   /** fingerprint 前 12 位——与 full 记录/control-plane 遥测做关联对账。 */
   fp: string
@@ -98,7 +102,7 @@ export function buildCognitiveFrameLiteRecord(
 ): CognitiveFrameLiteRecord {
   return {
     kind: COGNITIVE_FRAME_LITE_KIND,
-    v: frame.v,
+    v: 1,
     turn: frame.turn,
     fp: frame.inputFingerprint.slice(0, 12),
     mode: structureFlow?.mode ?? null,
@@ -141,8 +145,8 @@ export function replayCognitiveFrames(records: readonly CognitiveFrameRecord[]):
   const degradedTurns: number[] = []
 
   for (const record of records) {
-    if (record.v !== 1 && record.v !== 2) {
-      divergences.push({ turn: record.turn, field: 'v', recorded: record.v, recomputed: 2 })
+    if (record.v !== 1) {
+      divergences.push({ turn: record.turn, field: 'v', recorded: record.v, recomputed: 1 })
       continue
     }
 
@@ -160,7 +164,7 @@ export function replayCognitiveFrames(records: readonly CognitiveFrameRecord[]):
       turn: record.turn,
       phaseClass: record.phaseClass,
       ...record.facts,
-    }, record.v)
+    })
     for (const source of QUALITY_ORDER) {
       if (frame.quality[source] !== record.quality[source]) {
         divergences.push({

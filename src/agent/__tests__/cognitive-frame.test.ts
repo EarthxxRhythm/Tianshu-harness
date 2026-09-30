@@ -89,8 +89,8 @@ describe('assembleCognitiveFrame', () => {
       assert.equal(frame.facts.pal!.anyNeedsUser, false)
     })
 
-    it('v=2 schema 版本恒在', () => {
-      assert.equal(assembleCognitiveFrame(frameInput()).v, 2)
+    it('v=1 schema 版本恒在', () => {
+      assert.equal(assembleCognitiveFrame(frameInput()).v, 1)
     })
   })
 

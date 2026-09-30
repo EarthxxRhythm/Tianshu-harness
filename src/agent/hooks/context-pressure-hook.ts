@@ -1,12 +1,18 @@
-import { currentAdviceBudget, type RuntimeAdviceFacts } from '../runtime-advice-facts.js'
 import type { AfterPerceptionRuntimeHook, RuntimeHookContext } from '../runtime-hooks.js'
 import type { AdvisoryBus } from '../advisory-bus.js'
 
-/** Runtime input-budget notice, emitted only at threshold crossings.
- * Compaction remains the budget coordinator's decision. */
+/**
+ * Context Pressure Hook — afterPerception advisory when context window
+ * fill ratio exceeds a warning threshold.
+ *
+ * Suggests offloading remaining work to a new session before hitting the
+ * 86% split threshold (CompactBoundaryCoordinator.trySessionSplit).
+ *
+ * Tier: key='context-pressure', category='cerebellar', priority=0.5.
+ * One advisory per turn max. Suppressed when ratio drops back below threshold.
+ */
 
 export interface ContextPressureHookDeps {
-  adviceFacts?: RuntimeAdviceFacts
   getEstimatedTokens: () => number
   getContextWindow: () => number
   advisoryBus: Pick<AdvisoryBus, 'submit'>
@@ -19,7 +25,7 @@ export interface ContextPressureHookDeps {
 /** Ratio above which the advisory fires. Below 86% split but high enough
  *  to give the agent time to wrap up. */
 const PRESSURE_WARN_RATIO = 0.7
-/** Second notice threshold; not a promise of automatic session splitting. */
+/** Second escalation threshold — aligned with the 86% session-split boundary. */
 const PRESSURE_SPLIT_RATIO = 0.86
 /** Hysteresis: a threshold re-arms only after the ratio drops this far below it. */
 const REARM_HYSTERESIS = 0.05
@@ -36,9 +42,10 @@ export function createContextPressureHook(deps: ContextPressureHookDeps): AfterP
     name: 'context-pressure',
     run(ctx: RuntimeHookContext): void {
       void ctx
-      const budget = currentAdviceBudget(deps.adviceFacts)
-      if (!budget) return
-      const estimated = budget.inputTokens, window = budget.inputBudget
+      const estimated = deps.getEstimatedTokens()
+      const window = deps.getContextWindow()
+      if (window <= 0 || estimated <= 0) return
+
       const ratio = estimated / window
 
       // Re-arm thresholds the ratio has dropped safely below (compact/split).
@@ -56,8 +63,13 @@ export function createContextPressureHook(deps: ContextPressureHookDeps): AfterP
       if (crossed === PRESSURE_SPLIT_RATIO) firedThresholds.add(PRESSURE_WARN_RATIO)
 
       const continuationActive = deps.hasActiveContinuation?.() ?? false
-      const escalation = `运行时预算状态为 ${budget.state}；由预算协调器决定是否压缩，不能据此断言必然分拆会话。`
-        + (continuationActive ? '先核对当前目标和未完成义务，避免开启无关支线。' : '核对剩余工作，必要时保留交接记录。')
+      const escalation = crossed === PRESSURE_SPLIT_RATIO
+        ? (continuationActive
+          ? '已越过 86% 会话分拆线，compact-boundary 随时可能分拆会话——当前有未核销的目标/义务：先用最短路径核销（验证/交付已完成部分）再收束，不要开启与目标无关的新支线。'
+          : '已越过 86% 会话分拆线，compact-boundary 随时可能分拆会话——立即收束当前子任务。')
+        : (continuationActive
+          ? '接近上限时 compact-boundary 会自动分拆会话。当前有未核销的目标/义务：优先核销（验证/交付已完成部分）再收束，把与目标无关的后续工作留给新会话。'
+          : '接近上限时 compact-boundary 会自动分拆会话，但建议你主动收束当前子任务、把后续工作留给新会话。')
       deps.advisoryBus.submit({
         key: 'context-pressure',
         priority: crossed === PRESSURE_SPLIT_RATIO ? 0.6 : 0.5,
@@ -66,7 +78,7 @@ export function createContextPressureHook(deps: ContextPressureHookDeps): AfterP
         // 动作（收束子任务不是工具签名）→ informational tier、无 expect。
         // 硬填“任意工具出现”会制造伪采纳率，禁止。
         tier: 'informational',
-        content: `${budget.source === 'measured' ? '最近请求测量' : '本地估算'}的输入预算占用已跨越 ${Math.round(crossed * 100)}% 阈值（当前 ${Math.round(ratio * 100)}%，${estimated}/${window} tokens）。${escalation}`,
+        content: `上下文窗口使用率已跨越 ${Math.round(crossed * 100)}% 阈值（当前 ${Math.round(ratio * 100)}%，${estimated}/${window} tokens）。${escalation}`,
         ttl: 1,
       })
     },

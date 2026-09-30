@@ -1,4 +1,3 @@
-import { verificationAttempted } from './verification-activity.js'
 import type { AgentLoop } from './loop.js'
 import type { HealthSignal } from './trajectory-health.js'
 import type { ToolErrorClass } from '../tools/types.js'
@@ -63,8 +62,6 @@ export function recordToolHistory(
     const isTransientGuard = isError && isConvergenceTransient(errorKind, result)
     self.recentToolHistory.push({
       tool: name,
-      verificationAttempted: verificationAttempted(name, input),
-      modelTurn: self.modelObservationTurn,
       target,
       status: isError ? 'failed' : 'success',
       ...(bashActivity ? { bashActivity } : {}),

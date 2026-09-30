@@ -238,8 +238,6 @@ export function resolveTersenessFlags(ctx: {
 }
 
 export interface ToolHistoryEntry {
-  verificationAttempted?: boolean
-  modelTurn?: number
   tool: string
   target: string
   status: 'success' | 'failed' | 'running'

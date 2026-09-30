@@ -18,10 +18,10 @@ describe('AdvisoryReadback.getMatureLift 成熟度门', () => {
     const rb = new AdvisoryReadback()
     assert.equal(rb.getMatureLift('k'), null)
     // 决出样本够但 shadow 不足
-    rb.seedPriors([['k', { delivered: 10, adopted: 6, ignored: 4, shadowHeld: MATURE_LIFT_MIN_SHADOW - 1, shadowDecided: MATURE_LIFT_MIN_SHADOW - 1, profile: 'main', shadowSatisfied: 1 }]])
+    rb.seedPriors([['k', { delivered: 10, adopted: 6, ignored: 4, shadowHeld: MATURE_LIFT_MIN_SHADOW - 1, shadowSatisfied: 1 }]])
     assert.equal(rb.getMatureLift('k'), null)
     // shadow 够但决出不足
-    rb.seedPriors([['k', { delivered: 3, adopted: 2, ignored: 1, shadowHeld: 5, shadowDecided: 5, profile: 'main', shadowSatisfied: 1 }]])
+    rb.seedPriors([['k', { delivered: 3, adopted: 2, ignored: 1, shadowHeld: 5, shadowSatisfied: 1 }]])
     assert.ok(2 + 1 < MATURE_LIFT_MIN_DECIDED)
     assert.equal(rb.getMatureLift('k'), null)
   })
@@ -29,7 +29,7 @@ describe('AdvisoryReadback.getMatureLift 成熟度门', () => {
   test('会话实测 + 先验合并计算 lift', () => {
     const rb = new AdvisoryReadback()
     // 先验:决出 4(3 adopted + 1 ignored),shadow 2/1
-    rb.seedPriors([['k', { delivered: 4, adopted: 3, ignored: 1, shadowHeld: 2, shadowDecided: 2, profile: 'main', shadowSatisfied: 1 }]])
+    rb.seedPriors([['k', { delivered: 4, adopted: 3, ignored: 1, shadowHeld: 2, shadowSatisfied: 1 }]])
     // 会话:1 次真实采纳 + 1 次 shadow 未满足 → 合并后决出 5、shadow 3
     rb.track([{ key: 'k', category: 'discipline', expect: { kind: 'verify_attempted', withinTurns: 1 } }], 1)
     rb.observeTool({ turn: 1, name: 'run_tests', target: '', isError: false })
@@ -44,7 +44,7 @@ describe('AdvisoryReadback.getMatureLift 成熟度门', () => {
 
   test('纯会话 getLift 不受先验影响(保持原语义)', () => {
     const rb = new AdvisoryReadback()
-    rb.seedPriors([['k', { delivered: 10, adopted: 8, ignored: 2, shadowHeld: 5, shadowDecided: 5, profile: 'main', shadowSatisfied: 1 }]])
+    rb.seedPriors([['k', { delivered: 10, adopted: 8, ignored: 2, shadowHeld: 5, shadowSatisfied: 1 }]])
     assert.equal(rb.getLift('k'), null) // 会话内无实测
   })
 })

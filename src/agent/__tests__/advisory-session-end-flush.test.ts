@@ -137,8 +137,8 @@ describe('advisory-readback-finalize postSession hook', () => {
 
     const summary = records.filter(r => r.kind === ADVISORY_UNRESOLVED_KIND)
     assert.equal(summary.length, 1, '每会话只写一条汇总')
-    assert.equal(summary[0]!.count, 3)
-    assert.deepEqual(summary[0]!.byKey, { a: 2, b: 1 })
+    assert.equal(summary[0]!.count, 2)
+    assert.deepEqual(summary[0]!.byKey, { a: 1, b: 1 })
   })
 
   test('到期判定在 postSession 仍会落 advisory-outcome 与 totals 回调', () => {
