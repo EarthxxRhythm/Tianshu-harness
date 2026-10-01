@@ -36,12 +36,12 @@ export function buildTrustPromptText(stakes: ProjectTrustStakes, options: { cwd?
     lines.push(`项目配置会改变安全设置：${stakes.sensitiveKeys.join('、')}`)
   }
   if (stakes.hasHooks) {
-    lines.push('项目 hooks 可在工具执行前后运行进程。')
+    lines.push('项目 .rivet/hooks.json 可在工具执行前后运行进程。')
   }
   lines.push(
     '',
     '请确认这是你创建或信任的项目；不确定时，先检查项目配置。',
-    '授信可更改审批模式、预授权命令和出方向；记录仅保存在本机。',
+    '授信可更改审批模式、预授权命令和出方向；记录仅保存在本机，绝不写回仓库。',
     '暂不授信仍可继续，项目安全敏感配置和 hooks 将被忽略。',
     '',
     '  [y] 信任此项目（当次会话生效）',
