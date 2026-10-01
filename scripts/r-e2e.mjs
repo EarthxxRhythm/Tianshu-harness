@@ -30,7 +30,7 @@ const require = createRequire(import.meta.url)
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 
-const REPO = process.argv[2] || '/Users/banxia/app/deepseek-tui/cangzhe'
+const REPO = process.argv[2] || `${process.env.HOME}/app/deepseek-tui/cangzhe`
 const PORT = 3199
 const BASE = `http://127.0.0.1:${PORT}`
 const TOKEN = `r-e2e-${Date.now()}`

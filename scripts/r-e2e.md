@@ -9,7 +9,7 @@
 # 1. 先构建 sidecar（脚本依赖 dist/main.js）
 npm run build
 
-# 2. 跑验证（默认目标仓库：/Users/banxia/app/deepseek-tui/cangzhe）
+# 2. 跑验证（默认目标仓库：~/app/deepseek-tui/cangzhe）
 node scripts/r-e2e.mjs
 
 # 或指定任意干净的 git 仓库

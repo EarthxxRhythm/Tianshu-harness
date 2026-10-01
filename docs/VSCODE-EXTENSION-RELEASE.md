@@ -88,8 +88,8 @@ RIVET_HOME=$(mktemp -d)/rivet node tests/smoke.e2e.ts
 ### 5.1 代码进公开仓（前置）
 
 ```bash
-bash scripts/sync-to-public.sh   # rsync 工作树 → /Users/banxia/app/Tianshu
-cd /Users/banxia/app/Tianshu
+bash scripts/sync-to-public.sh   # rsync 工作树 → ~/app/Tianshu
+cd ~/app/Tianshu
 git add vscode-extension .github/workflows/vscode-extension.yml  # 按需选择性 add
 git add -f .github/workflows/vscode-extension.yml  # ⚠ 公开仓 .gitignore 挡 workflow，必须 -f
 git commit && git push
