@@ -368,3 +368,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #331 test: 修三条 Windows 路径分隔符导致的恒红守卫/断言（与是否真违规无关）（CLOSED）
 - #329 feat(cvm): CVM 拦截「发生时提示」——分级 + 聚合 + 开关（#247 第 1–3 条）（CLOSED）
 - #328 feat(tui): GlanceBar 常驻「本会话 CVM 拦截计数」（#247 补充项）（CLOSED）
+- #325 fix(docs): docs:check 不再对「已登记但未随本仓分发」的引用判失败——公开仓子集检出恒红 13 条（issue #176）（CLOSED）
