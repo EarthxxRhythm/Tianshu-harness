@@ -343,3 +343,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：Eternal-dream-MAX <130294909+Eternal-dream-MAX@users.noreply.github.com>
 
 - #333 完善 CLI 前端三平台兼容，汇总完整升级与回归（MERGED）
+- #330 feat(tui): 升级 CLI 交互、布局与配置流程（MERGED）
