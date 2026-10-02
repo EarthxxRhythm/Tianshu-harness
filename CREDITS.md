@@ -358,3 +358,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：Ver-zhzh <225828202+Ver-zhzh@users.noreply.github.com>
 
 - #327 fix(security): 敏感文件硬门可被 Windows 8.3 短文件名（ENV~1）绕过（CLOSED）
+- #326 fix(security): 敏感文件硬门可被 NTFS ::$DATA 后缀绕过（CLOSED）
