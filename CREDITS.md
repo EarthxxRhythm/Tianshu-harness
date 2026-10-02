@@ -363,3 +363,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #314 fix(model): 模型 id 自带冒号（cn: 前缀）时 /model 切换、设为默认、headless、serve 全部失效——首段仅在确为 provider 时才当前缀（#313）（CLOSED）
 - #312 feat(goal): 上下文接力——goal 模式到达阈值自动交接、开新会话继续（可选，默认关闭）（CLOSED）
 - #311 fix(security): 危险命令审批绕过——`git push -f` / `+refspec`、`git clean -fd(x)`、PowerShell `iwr | iex` 免审（CLOSED）
+- #310 fix(security): 敏感文件门绕过——`.env.*.local` 叠加后缀漏判、`git add` 引号/全局选项/通配形态漏检（CLOSED）
