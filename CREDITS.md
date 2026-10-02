@@ -352,3 +352,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #323 fix(api): 补 MiMo v2.6 两条模型元数据——拉取列表后视觉不勾、上下文落默认值（CLOSED）
 - #322 fix(api): 视觉判定不再采信 L3 推断值——模糊命中会跨厂商串味（CLOSED）
 - #321 fix(cli): headless -p 消费 --continue/--resume——续聊被静默忽略、历史全丢（CLOSED）
+
+## @Ver-zhzh
+
+署名：Ver-zhzh <225828202+Ver-zhzh@users.noreply.github.com>
+
+- #327 fix(security): 敏感文件硬门可被 Windows 8.3 短文件名（ENV~1）绕过（CLOSED）
