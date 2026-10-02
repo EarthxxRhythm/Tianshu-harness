@@ -366,3 +366,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #310 fix(security): 敏感文件门绕过——`.env.*.local` 叠加后缀漏判、`git add` 引号/全局选项/通配形态漏检（CLOSED）
 - #309 fix(agent): import-graph 漏边——父级 `../` 分支正则误写、ESM `.js`→`.ts` 未映射、多行 import / export-from 不识别（CLOSED）
 - #331 test: 修三条 Windows 路径分隔符导致的恒红守卫/断言（与是否真违规无关）（CLOSED）
+- #329 feat(cvm): CVM 拦截「发生时提示」——分级 + 聚合 + 开关（#247 第 1–3 条）（CLOSED）
