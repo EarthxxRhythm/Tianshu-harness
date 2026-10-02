@@ -360,3 +360,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #327 fix(security): 敏感文件硬门可被 Windows 8.3 短文件名（ENV~1）绕过（CLOSED）
 - #326 fix(security): 敏感文件硬门可被 NTFS ::$DATA 后缀绕过（CLOSED）
 - #316 fix(workers): esbuild service 子进程成为永久僵尸（每次写文件 +1）——空闲回收前先停 esbuild 并等其被回收（#315 问题 2）（CLOSED）
+- #314 fix(model): 模型 id 自带冒号（cn: 前缀）时 /model 切换、设为默认、headless、serve 全部失效——首段仅在确为 provider 时才当前缀（#313）（CLOSED）
