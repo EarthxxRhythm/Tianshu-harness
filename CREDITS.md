@@ -344,3 +344,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 
 - #333 完善 CLI 前端三平台兼容，汇总完整升级与回归（MERGED）
 - #330 feat(tui): 升级 CLI 交互、布局与配置流程（MERGED）
+
+## @Lin-Dongg
+
+署名：Lin-Dongg <322679856+Lin-Dongg@users.noreply.github.com>
+
+- #323 fix(api): 补 MiMo v2.6 两条模型元数据——拉取列表后视觉不勾、上下文落默认值（CLOSED）
