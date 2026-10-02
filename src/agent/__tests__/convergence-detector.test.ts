@@ -2097,8 +2097,9 @@ describe('evaluateConvergence', () => {
         'setup must not hit the productive-stagnation variant')
       assert.ok(result.injectedMessage!.includes('核实'),
         `generic diagnostic copy must be verification-first, got: ${result.injectedMessage!.slice(0, 150)}`)
-      assert.ok(result.injectedMessage!.includes('session_vitals'),
-        'generic diagnostic copy should point at session_vitals for self-state claims')
+      assert.ok(result.injectedMessage!.includes('暂无法确认'),
+        'without live capabilities, diagnostic copy must not invent an available tool')
+      assert.ok(!result.injectedMessage!.includes('session_vitals'))
     })
   })
 

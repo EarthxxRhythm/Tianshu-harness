@@ -28,6 +28,10 @@ export type FailureClass =
   /** git apply 拒绝补丁：diff 格式损坏（hunk 头计数错误）、上下文漂移、
    *  或目标文件不在索引。原样重发必然再失败，retryable=false。 */
   | 'patch_rejected'
+  /** 交付门禁判定未通过（deliver_task）：结论性阻塞，处理列出的阻塞项后
+   *  可重新交付。不是拒绝执行、不是环境噪音——retryable=false，全惩罚
+   *  （不进免疫/收敛豁免表：门禁失败是真实工作信号）。 */
+  | 'delivery_gate'
 
 export interface ClassifiedFailure {
   class: FailureClass
@@ -97,6 +101,7 @@ const CANONICAL: Record<FailureClass, { suggestion: string; retryable: boolean }
   probe_miss: { suggestion: '探测确认路径不存在——这本身是有效信息，记录结论即可，不要重试同一路径。', retryable: false },
   refused: { suggestion: '调用被设计性拒绝（目标不允许或协议不支持）。不要重复同一调用；改用允许的目标，或按提示修改配置。', retryable: false },
   patch_rejected: { suggestion: '补丁被 git apply 拒绝。先 read_file 读取目标当前内容，核对 hunk 头计数后重新生成 diff——勿原样重发同一补丁。', retryable: false },
+  delivery_gate: { suggestion: '处理门禁列出的阻塞项后重新交付；这是结论不是拒绝', retryable: false },
 }
 
 /** 从 ToolResult 的结构字段解析失败类别：errorKind 直读；

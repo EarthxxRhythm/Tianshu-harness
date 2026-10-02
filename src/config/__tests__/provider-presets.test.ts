@@ -85,11 +85,12 @@ describe('provider presets', () => {
     assert.ok(alias.aliases.includes('grok'), '短名 grok 应归一为 grok-4.6')
   })
 
-  it('codex preset uses OAuth and gpt-5.6-sol', () => {
+  it('codex preset uses OAuth and gpt-6.1-sol', () => {
     const codex = cloneProviderPreset('codex')
     assert.deepEqual(codex.auth, { type: 'oauth', provider: 'codex' })
     assert.equal(codex.capabilities.cacheControl, true)
-    assert.equal(codex.models[0]?.id, 'gpt-5.6-sol')
+    assert.equal(codex.models[0]?.id, 'gpt-6.1-sol')
+    assert.ok(codex.models.some(m => m.id === 'gpt-5.6-sol'), '上代 5.6-sol 保留在列（codex 后端仍 200，2026-10-02 实测）')
   })
 
   it('deepseek v4-pro 已恢复（官方 2026-09-13 改口径：继续服务不下线）+ flash 档 reasoningEffort', () => {

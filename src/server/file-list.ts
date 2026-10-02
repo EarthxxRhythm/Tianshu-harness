@@ -2,21 +2,22 @@
  * Project file enumeration + ranking for the desktop @file mention picker.
  *
  * `listProjectFiles` walks a session's cwd applying the same gitignore + silent-
- * layer filters the glob tool uses, capped at MAX_FILES. `rankFiles` is a pure
+ * layer filters the glob tool uses; the route caches the complete index. `rankFiles` is a pure
  * function (unit-tested) that orders candidates by relevance to a query string.
  *
  * Security: the walk is rooted at the session cwd and never follows symlinks or
  * descends into build/VCS dirs; the route layer passes only `session.cwd`.
  */
-import { readdir, lstat, realpath } from 'node:fs/promises'
+import { readdir, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { relativePosix } from '../path-format.js'
 import { GitignoreFilter } from '../tools/gitignore.js'
 import { classifyPath } from '../context/attention-filter.js'
 import { SCAN_EXCLUDE_DIRS } from '../tools/scan-excludes.js'
+import { contextFilePriority, isSuggestedContextFile } from './file-context-policy.js'
 
 const EXCLUDE_DIRS = SCAN_EXCLUDE_DIRS
-const MAX_FILES = 2000
+const directoryEntries = (dir: string) => readdir(dir, { withFileTypes: true })
 
 async function walk(
   dir: string,
@@ -25,7 +26,6 @@ async function walk(
   gitignore: GitignoreFilter,
   visited: Set<string>,
 ): Promise<void> {
-  if (results.length >= MAX_FILES) return
 
   let real: string
   try {
@@ -36,28 +36,23 @@ async function walk(
   if (visited.has(real)) return
   visited.add(real)
 
-  let names: string[]
+  let entries: Awaited<ReturnType<typeof directoryEntries>>
   try {
-    names = await readdir(dir)
+    entries = await directoryEntries(dir)
   } catch {
     return
   }
 
-  for (const name of names) {
-    if (results.length >= MAX_FILES) return
+  for (const s of entries) {
+    const name = s.name
     const fullPath = join(dir, name)
-    let s: Awaited<ReturnType<typeof lstat>>
-    try {
-      s = await lstat(fullPath)
-    } catch {
-      continue
-    }
     if (s.isSymbolicLink()) continue
     const rel = relativePosix(root, fullPath)
     const verdict = classifyPath(rel)
     if (s.isDirectory()) {
       if (EXCLUDE_DIRS.has(name)) continue
       if (verdict.tier === 'L0_build') continue
+      if (gitignore.isIgnored(root, fullPath)) continue
       await walk(fullPath, root, results, gitignore, visited)
     } else if (s.isFile()) {
       if (verdict.silent) continue
@@ -91,13 +86,17 @@ function isSubsequence(s: string, q: string): boolean {
 
 /**
  * Rank file paths by relevance to `query` and return the top `limit`.
- * Pure + deterministic — unit-tested. Empty query returns the shallowest paths.
+ * Pure + deterministic — unit-tested. Empty query prioritizes human files.
  */
 export function rankFiles(paths: string[], query: string, limit = 50): string[] {
+  return rankPaths(paths.filter(path => isSuggestedContextFile(path, query)), query, limit)
+}
+
+export function rankPaths(paths: string[], query: string, limit = 50): string[] {
   const q = query.trim().toLowerCase()
   if (!q) {
     return [...paths]
-      .sort((a, b) => depth(a) - depth(b) || a.length - b.length || a.localeCompare(b))
+      .sort((a, b) => contextFilePriority(a) - contextFilePriority(b) || depth(a) - depth(b) || a.length - b.length || a.localeCompare(b))
       .slice(0, limit)
   }
 
@@ -117,6 +116,7 @@ export function rankFiles(paths: string[], query: string, limit = 50): string[] 
 
   scored.sort((a, b) =>
     a.score - b.score ||
+    contextFilePriority(a.path) - contextFilePriority(b.path) ||
     a.path.length - b.path.length ||
     a.path.localeCompare(b.path),
   )
@@ -137,25 +137,21 @@ export interface DirEntry {
  * Directories sorted first, then files, both alphabetical.
  * Returns [] for non-existent or unreadable directories.
  */
-export async function listDirEntries(dir: string): Promise<DirEntry[]> {
-  let names: string[]
+export async function listDirEntries(dir: string, strict = false): Promise<DirEntry[]> {
+  let children: Awaited<ReturnType<typeof directoryEntries>>
   try {
-    names = await readdir(dir)
-  } catch {
+    children = await directoryEntries(dir)
+  } catch (err) {
+    if (strict) throw err
     return []
   }
   const gitignore = await GitignoreFilter.create(dir)
   const entries: DirEntry[] = []
-  for (const name of names) {
+  for (const s of children) {
+    const name = s.name
     // Exclude hidden dirs like .git, .rivet — but allow dotfiles (.env.example)
     if (name.startsWith('.') && EXCLUDE_DIRS.has(name)) continue
     const fullPath = join(dir, name)
-    let s: Awaited<ReturnType<typeof lstat>>
-    try {
-      s = await lstat(fullPath)
-    } catch {
-      continue
-    }
     if (s.isSymbolicLink()) continue
     if (s.isDirectory()) {
       if (EXCLUDE_DIRS.has(name)) continue

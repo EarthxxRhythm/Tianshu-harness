@@ -19,7 +19,7 @@ import { MockOut, MockIn, stripAnsi } from './_harness.js'
 
 // 粘贴测试隔离系统剪贴板——onPaste 现在会先尝试读剪贴板图片（修复右键粘贴丢图），
 // 测试环境注入「无图」reader 确保走文本路径，不受本机剪贴板当前内容影响。
-beforeEach(() => { setClipboardReader({ readImage: async () => null }) })
+beforeEach(() => { setClipboardReader({ readText: async () => null, readImage: async () => null }) })
 afterEach(() => { setClipboardReader(null) })
 
 function makeApp() {
@@ -34,6 +34,12 @@ function makeApp() {
 }
 
 const tick = (ms = 10) => new Promise(r => setTimeout(r, ms))
+
+async function waitForPaste(ready: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5000
+  while (!ready() && Date.now() < deadline) await tick()
+  assert.ok(ready(), 'asynchronous file paste must complete')
+}
 
 test('start/dispose 切换 bracketed paste 模式', () => {
   const { app, out } = makeApp()
@@ -69,7 +75,7 @@ test('粘贴插入到光标处（已有文本之间）', async () => {
 test('右键粘贴：剪贴板有图时附图，不插入乱码文本', async () => {
   // 模拟右键粘贴——终端把图片字节当文本注入 stdin（bracketed paste 包裹），
   // 同时系统剪贴板里确实有图。onPaste 应优先读剪贴板附图，吞掉乱码文本。
-  setClipboardReader({ readImage: async () => ({ dataUrl: 'data:image/png;base64,iVBOR=', mime: 'image/png', name: 'clipboard.png', source: 'png' }) })
+  setClipboardReader({ readText: async () => null, readImage: async () => ({ dataUrl: 'data:image/png;base64,iVBOR=', mime: 'image/png', name: 'clipboard.png', source: 'png' }) })
   const { app, stdin } = makeApp()
   app.start()
   // 模拟终端注入的图片字节乱码（实际是二进制被 UTF-8 解码的残留）
@@ -84,7 +90,7 @@ test('右键粘贴：剪贴板有图时附图，不插入乱码文本', async ()
 test('右键粘贴：剪贴板无图时正常插入文本', async () => {
   // 无图时 onPaste 应回退到文本路径（已由 beforeEach 的 null reader 覆盖，
   // 这里显式再测一次确保回退逻辑正确）
-  setClipboardReader({ readImage: async () => null })
+  setClipboardReader({ readText: async () => null, readImage: async () => null })
   const { app, stdin } = makeApp()
   app.start()
   stdin.dataHandler!('\x1B[200~hello world\x1B[201~')
@@ -99,7 +105,7 @@ test('性能契约：普通文本粘贴不读剪贴板图片', async () => {
   // macOS 无 native 读图包时退化为 spawn osascript，本机实测每次普通文本粘贴
   // 被推迟 410–707ms（端到端中位 512ms，跳过读图后 5ms）。
   let readCalls = 0
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     readImage: async () => { readCalls++; return null },
   })
   const { app, stdin } = makeApp()
@@ -113,7 +119,7 @@ test('性能契约：普通文本粘贴不读剪贴板图片', async () => {
 
 test('性能契约：多行/中文粘贴同样走零等待快路径', async () => {
   let readCalls = 0
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     readImage: async () => { readCalls++; return null },
   })
   const { app, stdin } = makeApp()
@@ -127,7 +133,7 @@ test('性能契约：多行/中文粘贴同样走零等待快路径', async () =
 
 test('防乱码防御未退化：乱码粘贴仍读剪贴板并附图', async () => {
   let readCalls = 0
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     readImage: async () => {
       readCalls++
       return { dataUrl: 'data:image/png;base64,iVBOR=', mime: 'image/png', name: 'clipboard.png', source: 'png' }
@@ -164,7 +170,7 @@ test('多行图片路径一次粘贴 → 全部挂成附件，路径文本不进
     const { app, stdin } = makeApp()
     app.start()
     stdin.dataHandler!(`\x1B[200~${a}\r\n${b}\x1B[201~`)
-    await tick(60)
+    await waitForPaste(() => app.getInputImagesCount() === 2)
     assert.equal(app.getInputImagesCount(), 2, '两行路径都要成为附件')
     assert.equal(app.getInputValue(), '', '路径文本不该进输入框')
     app.dispose()
@@ -176,7 +182,7 @@ test('单行路径仍是老行为：1 张附件、无文本', async () => {
     const { app, stdin } = makeApp()
     app.start()
     stdin.dataHandler!(`\x1B[200~${only}\x1B[201~`)
-    await tick(60)
+    await waitForPaste(() => app.getInputImagesCount() === 1)
     assert.equal(app.getInputImagesCount(), 1)
     assert.equal(app.getInputValue(), '')
     app.dispose()
@@ -200,7 +206,7 @@ test('部分加载失败：成功的挂上、失败的报错，路径文本不�
     const { app, out, stdin } = makeApp()
     app.start()
     stdin.dataHandler!(`\x1B[200~${ok}\r\n${missing}\x1B[201~`)
-    await tick(60)
+    await waitForPaste(() => app.getInputImagesCount() === 1)
     assert.equal(app.getInputImagesCount(), 1, '成功的那张贴上')
     assert.equal(app.getInputValue(), '', '不能把失败的路径当文本插进去')
     assert.ok(stripAnsi(out.chunks.join('')).includes('图片加载失败'), '失败必须可见')
@@ -213,7 +219,7 @@ test('全部加载失败 → 回退为普通文本粘贴（保留单图旧行为
   const { app, out, stdin } = makeApp()
   app.start()
   stdin.dataHandler!(`\x1B[200~${missing}\x1B[201~`)
-  await tick(60)
+  await waitForPaste(() => app.getInputValue() === missing)
   assert.equal(app.getInputImagesCount(), 0)
   assert.equal(app.getInputValue(), missing, '加载失败时路径仍作为文本可编辑')
   assert.ok(stripAnsi(out.chunks.join('')).includes('图片加载失败'))
@@ -225,7 +231,7 @@ test('超过 MAX_IMAGES：加载到上限并提示已跳过（不静默丢）', 
     const { app, out, stdin } = makeApp()
     app.start()
     stdin.dataHandler!(`\x1B[200~${paths.join('\r\n')}\x1B[201~`)
-    await tick(120)
+    await waitForPaste(() => app.getInputImagesCount() === 4)
     assert.equal(app.getInputImagesCount(), 4, '上限 4 张')
     assert.equal(app.getInputValue(), '')
     assert.ok(stripAnsi(out.chunks.join('')).includes('已跳过 1 张'), '跳过多少要说明')

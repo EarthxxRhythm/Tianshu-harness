@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, rmSync, chmodSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { resolveGitCommand, gitEnv, spawnGitSync, spawnGit } from '../spawn-git.js'
@@ -37,8 +37,18 @@ describe('resolveGitCommand', () => {
     assert.notEqual(got, '/nope/does/not/exist/git')
   })
 
-  it('Win: probes LOCALAPPDATA candidate when set', () => {
+  it('Win: probes LOCALAPPDATA candidate when set', (t) => {
     if (!isWin) return
+    // Program Files / x86 候选在真机存在时会先行命中（候选顺序保证，见 spawn-git.ts
+    // 候选表）——本用例只在「前两位候选都不可见」的机器上有判别力。
+    // LOCALAPPDATA 分支本身的接线已由 'via injected existsSync' 用例确定性覆盖。
+    if (
+      existsSync('C:\\Program Files\\Git\\cmd\\git.exe')
+      || existsSync('C:\\Program Files (x86)\\Git\\cmd\\git.exe')
+    ) {
+      t.skip('real-fs variant: Program Files git present on this host — LOCALAPPDATA branch unreachable by design')
+      return
+    }
     const dir = tmpDir()
     const prev = process.env['LOCALAPPDATA']
     try {
@@ -47,7 +57,10 @@ describe('resolveGitCommand', () => {
       mkdirSync(gitDir, { recursive: true })
       const git = fakeGitExe(gitDir)
       process.env['LOCALAPPDATA'] = dir
-      const got = resolveGitCommand({})
+      const got = resolveGitCommand(
+        { RIVET_GIT_PATH: '' },
+        { existsSync: p => p === git && existsSync(p) },
+      )
       assert.equal(got, git, 'should find git via LOCALAPPDATA candidate')
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -200,12 +213,22 @@ describe('spawnGitSync', () => {
   })
 
   it('passes cwd through to the child process', () => {
-    const r = spawnGitSync(['rev-parse', '--show-toplevel'], {
-      cwd: process.cwd(),
-      encoding: 'utf-8',
-      timeout: 5000,
-    })
-    assert.equal(r.status, 0)
+    const dir = tmpDir()
+    try {
+      const init = spawnGitSync(['init'], { cwd: dir, encoding: 'utf-8', timeout: 5000 })
+      assert.equal(init.status, 0, init.stderr)
+      const childDir = join(dir, 'nested')
+      mkdirSync(childDir)
+      const r = spawnGitSync(['rev-parse', '--show-toplevel'], {
+        cwd: childDir,
+        encoding: 'utf-8',
+        timeout: 5000,
+      })
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(realpathSync(r.stdout.trim()), realpathSync(dir))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

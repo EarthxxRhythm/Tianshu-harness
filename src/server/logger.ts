@@ -53,7 +53,12 @@ export function errorContext(error: unknown): Record<string, unknown> {
   return { message: String(error) }
 }
 
-function formatLog(level: string, message: string, context?: Record<string, unknown>): string {
+/**
+ * 格式化一行服务端日志（`[server:LEVEL] message`）。导出供 serveCommand 的
+ * jsonMode stderr 重定向复用同一格式——stdout 纯度契约下 info 行改走 stderr
+ * 时保持字面一致，不另造第二份格式。
+ */
+export function formatLog(level: string, message: string, context?: Record<string, unknown>): string {
   if (!context || Object.keys(context).length === 0) return `[server:${level}] ${message}`
   return `[server:${level}] ${message} ${safeJson(context)}`
 }

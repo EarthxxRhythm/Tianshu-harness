@@ -4,7 +4,7 @@
 
 import { shouldCaptureResponseBody, truncateResponseBody } from './log-capture.js'
 export type { BrowserCookie } from './pw-surface.js'
-import { PLAYWRIGHT_INSTALL_HINT, isBrowserMissingError } from '../net/playwright-driver.js'
+import { PLAYWRIGHT_INSTALL_HINT, isBrowserMissingError, resolveLaunchExecutablePath } from '../net/playwright-driver.js'
 import {
   loadPlaywright,
   type BrowserCookie,
@@ -669,10 +669,15 @@ export const playwrightDriverFactory: BrowserDebugDriverFactory = async (opts) =
   // 的 launchChromium 同口径）。挂在模块加载失败上会把排查引向错误方向。
   let context: PwContext
   try {
+    // #302：与 net/launchHeadlessChromium 同判据的 launch 定位（收编公开仓 PR #320）——
+    // 托管 full chromium 存在即透传（绕开 headless-shell 错位），否则系统浏览器；
+    // 都没有则不传、回落 registry 默认解析。profile 隔离语义不变（userDataDir 原样）。
+    const executablePath = resolveLaunchExecutablePath(mod.chromium)
     context = await mod.chromium.launchPersistentContext(opts.userDataDir, {
       headless: opts.headless,
       viewport: opts.viewport ?? DEFAULT_VIEWPORT,
       args: ANTI_THROTTLE_ARGS,
+      ...(executablePath ? { executablePath } : {}),
     })
   } catch (err) {
     if (isBrowserMissingError(err)) {

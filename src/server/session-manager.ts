@@ -16,6 +16,9 @@
  *  - Artifacts are surfaced from each session's own ArtifactStore, never shared
  *    across sessions (B4).
  */
+import { snapshotGoal, baselineGoalSnapshot } from './goal-snapshot.js'
+import { bindGoalRollover, canAttachRollover } from './goal-rollover-binding.js'
+import { rememberGoalInputs } from './goal-rollover-inputs.js'
 import type { AgentCallbacks, ApprovalMode } from '../agent/loop-types.js'
 import { touchActivity, setActivityPhase, beginRun as beginActivityRun, finishRun as finishActivityRun, withActivityRun } from '../agent/stall-observer.js'
 import { randomUUID } from 'node:crypto'
@@ -38,7 +41,7 @@ import type { Usage } from '../api/types.js'
 import { isAssistantWithTools, oaiMessageText, type OaiToolCall } from '../api/oai-types.js'
 import { buildUserAnchors, stripInjectedSuffix } from './rewind-anchors.js'
 import { toolArgSummary } from '../tui/tool-label.js'
-import { listPersistedResultRounds, loadPersistedResult, type PersistedResultRound } from '../agent/coordinator.js'
+import { listPersistedResultRounds, loadPersistedResult, type PersistedResultRound } from '../agent/worker-result-store.js'
 import { reapSessionModuleStores } from '../agent/session-module-store-reaper.js'
 import { deleteSessionFiles, SessionPersist } from '../agent/session-persist.js'
 import { loadWorkerSession } from '../agent/worker-session-persist.js'
@@ -535,6 +538,7 @@ export interface GoalSnapshot {
   wallClockBudgetMs?: number
   terminalReason?: string
   successCriteria: string[]
+  rollover?: import('../agent/goal-tracker.js').GoalRolloverConfig
   /** Last completion-judge verdict (null until the first judge run). Shape
    *  mirrors StoredGoalJudgeVerdict from goal-tracker (kept as a structural
    *  type here to avoid a static import — the field is pass-through only). */
@@ -1175,6 +1179,15 @@ const DELTA_COALESCE_MAX_CHARS = 2_048
 const TOOL_RESULT_COALESCE_MS = 40
 const TOOL_RESULT_COALESCE_BYTES = 2_048
 
+/**
+ * 崩溃恢复时序号跳过的号段。事件先推给在线订阅者、后经写缓冲落盘（非关键类型最多攒
+ * 100ms，写链异步，磁盘卡顿时积压更多），进程被杀时这段尾巴客户端已经见过、磁盘上却
+ * 没有。新实例若紧接磁盘高水位续号，客户端从已见游标续播，会把中断标记、续跑入口和
+ * 下一条用户消息都当重复丢掉。号段只需大于死掉的实例可能推出而未落盘的事件数；序号
+ * 不要求连续（各消费端只排序、只做大于比较）。
+ */
+export const CRASH_RECOVERY_SEQ_GAP = 100_000
+
 function takeUtf8Prefix(text: string, maxBytes: number): { head: string; tail: string } {
   let bytes = 0
   let end = 0
@@ -1327,6 +1340,7 @@ export class RuntimeSessionManager {
    *  Serializes builds; entries removed when the shared promise settles. */
   private readonly agentBuilds = new Map<string, Promise<ManagedAgent>>()
   private readonly createAgent: AgentFactory
+  private readonly goalRollover: ReturnType<typeof bindGoalRollover>
   private readonly runLedger?: import('./run-ledger.js').RunLedger
   private readonly recoveryJournal?: import('./recovery-journal.js').RecoveryJournal
   private readonly defaultCwd: string
@@ -1423,6 +1437,17 @@ export class RuntimeSessionManager {
     const envExternalScan = Number(process.env.RIVET_EXTERNAL_SCAN_MS)
     this.externalScanMs = opts.externalScanMs
       ?? (Number.isFinite(envExternalScan) && envExternalScan >= 0 ? Math.floor(envExternalScan) : 5_000)
+    this.goalRollover = bindGoalRollover(this, {
+      journal: this.recoveryJournal, sessions: this.sessions, approvalMode: () => this.globalApprovalMode,
+      append: (session, view) => this.append(session, 'goal_rollover', { ...view, ...(view.error ? { error: redactText(view.error) } : {}) }),
+      persist: session => this.persistRecord(session),
+      blocked: id => {
+        const s = this.sessions.get(id)
+        if (!s || s.pendingDelegations.size || s.backgroundAborts?.size || this.hasLiveCoordinatorDelegation(s)
+          || s.jobs?.list().some(job => job.status === 'running')) return '仍有子任务或后台任务，接力已暂停'
+        return undefined
+      },
+    })
     if (this.idleAgentTtlMs > 0) {
       // Sweep once a minute; unref so the timer never keeps the process alive.
       this.idleSweepTimer = setInterval(() => this.sweepIdleAgents(), 60_000)
@@ -1781,7 +1806,7 @@ export class RuntimeSessionManager {
             // can retry recovery after the storage read becomes available.
             continue
           }
-          session.seq = Math.max(session.seq, durableHighWater)
+          session.seq = Math.max(session.seq, durableHighWater) + CRASH_RECOVERY_SEQ_GAP
           session.record.lastSeq = session.seq
           // Persist the markers straight to disk WITHOUT keeping the log
           // resident. They re-appear when ensureEvents() reads it on first open.
@@ -1860,6 +1885,7 @@ export class RuntimeSessionManager {
       }
       this.sessions.set(session.record.id, session)
       if (wasRunning) {
+        session.seq += CRASH_RECOVERY_SEQ_GAP
         // Close out approvals the crash left dangling (see lazy path above) —
         // here the full log is already in memory, so scan it directly.
         const orphans = findOrphanedApprovals(events)
@@ -2837,10 +2863,13 @@ export class RuntimeSessionManager {
         : [...queuedDocuments, ...(opts?.documentRefs ?? []), ...this.persistDocuments(id, docInputs)]
       // Snapshot "first user message" BEFORE appending — the auto-title hook
       // below needs to know whether this run is the conversation opener.
+      if (this.getSessionGoalTracker(id)?.getRollover()) rememberGoalInputs(session.record, imageIds, documentRefs)
       const wasFirstUser = !session.events.some((e) => e.type === 'user')
       this.append(session, recovery ? 'recovery_status' : 'user', {
         text: prompt,
         ...(opts?.promptText !== undefined && !recovery ? { promptText: opts.promptText } : {}),
+        // 桌面端按它把乐观回显对上这条消息；不经 /prompt 回执发起的 run 没有它。
+        ...(receipt && !recovery ? { requestId: receipt.requestId } : {}),
         ...(images?.length
           ? { imageCount: images.length, ...(imageIds.length ? { imageIds } : {}) }
           : {}),
@@ -2851,8 +2880,8 @@ export class RuntimeSessionManager {
       // MissionProjector + GoalBar can cold-start from the event stream instead
       // of relying on HTTP polling. No goalId/tracker yet — just an active empty
       // goal that moves the projector phase from 'draft' to 'executing'.
-      if (wasFirstUser) {
-        this.append(session, 'goal_state', this.baselineGoalSnapshot() as unknown as Record<string, unknown>)
+      if (wasFirstUser && !this.getSessionGoalTracker(id)) {
+        this.append(session, 'goal_state', baselineGoalSnapshot() as unknown as Record<string, unknown>)
       }
       this.persistRecord(session)
       // Auto-generate a session title from the first user message when none is
@@ -2953,6 +2982,9 @@ export class RuntimeSessionManager {
               }
             })
             this.maybeWatchdogAutoContinue(session)
+            setImmediate(() => { void this.goalRollover.onRunSettled(id).catch(error => {
+              this.append(session, 'error', { error: redactText(String(error)), code: 'goal_rollover_failed' })
+            }) })
             this.scheduleQueueLaneFlush(session)
             if (session.record.archived) this.unloadSession(session)
           } finally {
@@ -3815,20 +3847,26 @@ export class RuntimeSessionManager {
     wallClockMs?: number
     successCriteria?: string[]
     maxJudgeRuns?: number
+    rollover?: import('../agent/goal-tracker.js').GoalRolloverConfig
+    resumeRecord?: import('../agent/goal-state.js').GoalStateRecord
+    rolloverId?: string
   }): Promise<GoalSnapshot | null> {
     const session = this.sessions.get(id)
     if (!session) return null
     const handles = this.resolveGoalHandles?.(id)
     if (!handles) return null
+    if (!opts.resumeRecord) { this.goalRollover.cancel(id); session.record.goalInputs = undefined; session.record.goalRollover = undefined }
     const { GoalTracker } = await import('../agent/goal-tracker.js')
     const { saveGoalState } = await import('../agent/goal-persist.js')
-    const tracker = new GoalTracker({
+    if (opts.resumeRecord && opts.rolloverId && !canAttachRollover(session.record, session.running, this.getSessionGoalTracker(id), opts.rolloverId, opts.resumeRecord.goalId)) return null
+    const tracker = opts.resumeRecord ? GoalTracker.fromRecord(opts.resumeRecord) : new GoalTracker({
       goal: opts.goal,
       maxIterations: opts.maxIterations,
       contextWindow: opts.contextWindow,
       ...(opts.wallClockMs !== undefined ? { wallClockMs: opts.wallClockMs } : {}),
       ...(opts.successCriteria ? { successCriteria: opts.successCriteria } : {}),
       ...(opts.maxJudgeRuns !== undefined ? { maxJudgeRuns: opts.maxJudgeRuns } : {}),
+      ...(opts.rollover ? { rollover: opts.rollover } : {}),
     })
     // Sync BOTH the agent field (drives GoalContinuationController) AND the refs
     // slot (read by update_goal / deliver_task tool closures). Out of sync →
@@ -3836,18 +3874,20 @@ export class RuntimeSessionManager {
     try { session.agent?.setGoalTracker?.(tracker) } catch { /* non-fatal */ }
     handles.goalTrackerRef.current = tracker
     try { saveGoalState(handles.sessionDir, id, tracker) } catch { /* non-fatal */ }
-    this.append(session, 'goal_state', this.snapshotGoal(tracker) as unknown as Record<string, unknown>)
+    this.append(session, 'goal_state', snapshotGoal(tracker) as unknown as Record<string, unknown>)
     // Async criteria extraction (fail-open). Mirrors main.ts:392-414.
-    void this.extractCriteria(id, opts.goal, tracker)
-    return this.snapshotGoal(tracker)
+    if (!opts.resumeRecord) void this.extractCriteria(id, opts.goal, tracker)
+    return snapshotGoal(tracker)
   }
 
   /** Pause / resume — mutate tracker state, persist, emit. */
   pauseGoal(id: string, reason?: string): GoalSnapshot | null {
+    this.goalRollover.cancel(id)
     return this.mutateGoal(id, (t) => { t.pause(reason ?? 'user', 'user') })
   }
-  resumeGoal(id: string): GoalSnapshot | null {
-    return this.mutateGoal(id, (t) => { t.resume('user') })
+  resumeGoal(id: string, actor: 'user' | 'runtime' = 'user'): GoalSnapshot | null {
+    if (actor === 'user') this.goalRollover.cancel(id)
+    return this.mutateGoal(id, (t) => { t.resume(actor) })
   }
   /**
    * Cancel is terminal — also clear the agent tracker + refs + persisted
@@ -3860,6 +3900,7 @@ export class RuntimeSessionManager {
    * new setGoal's saveGoalState, wiping the new goal's state file.
    */
   async cancelGoal(id: string): Promise<GoalSnapshot | null> {
+    this.goalRollover.cancel(id)
     const session = this.sessions.get(id)
     if (!session) return null
     const handles = this.resolveGoalHandles?.(id)
@@ -3875,17 +3916,20 @@ export class RuntimeSessionManager {
         deleteGoalState(handles.sessionDir, id)
       } catch { /* non-fatal — file may not exist */ }
     }
-    this.append(session, 'goal_state', this.snapshotGoal(tracker) as unknown as Record<string, unknown>)
-    return this.snapshotGoal(tracker)
+    this.append(session, 'goal_state', snapshotGoal(tracker) as unknown as Record<string, unknown>)
+    return snapshotGoal(tracker)
   }
+
+  getSessionGoalTracker(id: string): import('../agent/goal-tracker.js').GoalTracker | null {
+    if (!this.sessions.has(id)) return null
+    return this.resolveGoalHandles?.(id)?.goalTrackerRef.current ?? this.sessions.get(id)?.agent?.getGoalTracker?.() ?? null
+  }
+  async retryGoalRollover(id: string): Promise<boolean> { return (await this.ensureSessionAgent(id)) ? this.goalRollover.retry(id) : false }
+  async flushGoalRollover(): Promise<void> { await this.goalRollover.flush() }
 
   /** Read-only snapshot for the GET endpoint / SSE events. */
   getGoalState(id: string): GoalSnapshot | null {
-    const session = this.sessions.get(id)
-    if (!session) return null
-    const handles = this.resolveGoalHandles?.(id)
-    const tracker = handles?.goalTrackerRef.current ?? session.agent?.getGoalTracker?.() ?? null
-    return tracker ? this.snapshotGoal(tracker) : null
+    return snapshotGoal(this.getSessionGoalTracker(id))
   }
 
   private mutateGoal(id: string, fn: (t: import('../agent/goal-tracker.js').GoalTracker) => void): GoalSnapshot | null {
@@ -3900,42 +3944,8 @@ export class RuntimeSessionManager {
         try { saveGoalState(handles.sessionDir, id, tracker) } catch { /* non-fatal */ }
       }).catch(() => {})
     }
-    this.append(session, 'goal_state', this.snapshotGoal(tracker) as unknown as Record<string, unknown>)
-    return this.snapshotGoal(tracker)
-  }
-
-  private snapshotGoal(t: import('../agent/goal-tracker.js').GoalTracker): GoalSnapshot {
-    const terminalReason = t.getTerminalReason()
-    return {
-      goalId: t.getGoalId(),
-      goal: t.getGoal(),
-      status: t.getStatus(),
-      iteration: t.getIteration(),
-      maxIterations: t.getMaxIterations(),
-      wallClockElapsedMs: t.getWallClockElapsedMs(),
-      ...(t.getWallClockBudgetMs() !== undefined ? { wallClockBudgetMs: t.getWallClockBudgetMs() } : {}),
-      ...(terminalReason ? { terminalReason } : {}),
-      successCriteria: t.getSuccessCriteria(),
-      ...(t.getLastVerdict() ? { lastVerdict: t.getLastVerdict()! } : {}),
-    }
-  }
-
-  /**
-   * P2-B: Baseline goal_state snapshot emitted on the first user message.
-   * No GoalTracker exists yet — this is a synthetic active-empty goal that
-   * lets MissionProjector transition from 'draft' to 'executing' phase.
-   * Subsequent setGoal/extractCriteria calls will emit richer goal_state events.
-   */
-  private baselineGoalSnapshot(): GoalSnapshot {
-    return {
-      goalId: '',
-      goal: '',
-      status: 'active',
-      iteration: 0,
-      maxIterations: 0,
-      wallClockElapsedMs: 0,
-      successCriteria: [],
-    }
+    this.append(session, 'goal_state', snapshotGoal(tracker) as unknown as Record<string, unknown>)
+    return snapshotGoal(tracker)
   }
 
   private async extractCriteria(id: string, goal: string, tracker: import('../agent/goal-tracker.js').GoalTracker): Promise<void> {
@@ -3955,7 +3965,7 @@ export class RuntimeSessionManager {
       const criteria = await extractGoalCriteria(goal, completion)
       tracker.setSuccessCriteria(criteria)
       const s = this.sessions.get(id)
-      if (s) this.append(s, 'goal_state', this.snapshotGoal(tracker) as unknown as Record<string, unknown>)
+      if (s) this.append(s, 'goal_state', snapshotGoal(tracker) as unknown as Record<string, unknown>)
     } catch {
       // non-fatal — tracker keeps its generic default criteria
     }
@@ -4817,6 +4827,7 @@ export class RuntimeSessionManager {
   }
 
   abort(id: string): boolean {
+    this.goalRollover.cancel(id)
     const s = this.sessions.get(id)
     if (!s) return false
     const wasRunning = s.running
@@ -4955,7 +4966,7 @@ export class RuntimeSessionManager {
       clearInterval(this.externalScanTimer)
       this.externalScanTimer = undefined
     }
-    const pending: Promise<void>[] = []
+    const pending: Promise<void>[] = [this.goalRollover.shutdown()]
     for (const s of this.sessions.values()) {
       let shutdownResult: void | boolean | Promise<void | boolean> | undefined
       try {
@@ -4986,6 +4997,7 @@ export class RuntimeSessionManager {
    * Returns false when the session is missing or already archived.
    */
   archiveSession(id: string): boolean {
+    this.goalRollover.cancel(id)
     const s = this.sessions.get(id)
     if (!s || s.record.archived) return false
     const wasRunning = s.running
@@ -5004,7 +5016,7 @@ export class RuntimeSessionManager {
     // branch carries commits not merged into the main workspace, keep the
     // branch (only the worktree directory is removed) so work stays landable.
     let branchKept = false
-    if (s.record.worktreePath) {
+    if (s.record.worktreePath && ![...this.sessions.values()].some(other => other !== s && !other.record.archived && other.record.cwd === s.record.cwd)) {
       try {
         const work = hasUnlandedWork(this.defaultCwd, s.record.worktreePath, s.record.worktreeBranch)
         if (work.dirty) {
@@ -7123,7 +7135,7 @@ export class RuntimeSessionManager {
     const refs: SessionDocumentRef[] = []
     for (const doc of documents) {
       const base64 = doc.dataUrl.split(',')[1] ?? ''
-      if (!base64) continue
+      if (!base64 && !doc.dataUrl.startsWith('data:text/plain;base64,')) continue
       const bytes = Buffer.from(base64, 'base64').length
       const mimeMatch = /^data:([^;,]+)/.exec(doc.dataUrl)
       const mime = mimeMatch?.[1] ?? 'application/octet-stream'

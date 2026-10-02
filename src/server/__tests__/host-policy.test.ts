@@ -14,7 +14,7 @@ import { connect, createServer } from 'node:net'
 import { startServer } from '../index.js'
 import { buildRemoteInfoRoutes, sortLanUrls } from '../remote-info-routes.js'
 import { isLoopbackBind, isLoopbackHostHeader } from '../host-policy.js'
-import { parseHostsAllow } from '../serve.js'
+import { parseHostsAllow } from '../host-policy.js'
 
 const TOKEN = 'test-token-abc'
 

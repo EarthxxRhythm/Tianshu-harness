@@ -181,6 +181,7 @@ describe('deliver-task — semantic task delivery tool', () => {
       assert.ok(result.content.includes('impacted tests'))
       assert.ok(result.content.includes('src/__tests__/consumer.test.ts'))
       assert.ok(result.content.includes('force=true'))
+      assert.equal(result.errorKind, 'delivery_gate', '门禁失败必须结构化标注（T3）')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -1186,6 +1187,7 @@ describe('deliver-task — semantic task delivery tool', () => {
 
     assert.equal(result.isError, true)
     assert.match(result.content, /Commit requires/)
+    assert.equal(result.errorKind, 'format_error', '参数缺失与 browser_debug 参数校验同构（T3）')
   })
 
   it('reports scoped commit executor failure as tool error', async () => {
@@ -1966,6 +1968,7 @@ Do not declare a streamed response duplicate in the middle of the stream.
         assert.equal(result.isError, true)
         assert.equal(committed, false)
         assert.match(result.content, /Cannot commit: cross-session claim conflicts are present/)
+        assert.equal(result.errorKind, 'delivery_gate', 'claim 冲突硬拦是门禁判定（T3）')
       } finally {
         registry.close()
         try { rmSync(tmpDir, { recursive: true, force: true }) } catch { /* ignore */ }
@@ -2144,6 +2147,7 @@ Do not declare a streamed response duplicate in the middle of the stream.
 
       assert.equal(result.isError, true)
       assert.match(result.content, /not in owned files/)
+      assert.equal(result.errorKind, 'delivery_gate', 'ownership 拒绝是门禁判定（T3）')
     })
 
     it('rejects empty files array', async () => {

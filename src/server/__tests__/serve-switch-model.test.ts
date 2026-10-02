@@ -60,8 +60,11 @@ test('B5: 未认证 oauth provider 不截胡裸别名——continue 扫到带 ke
   // 修复：oauth 分支用 isAuthenticated() 判凭据，未认证同样 continue。
   // 隔离：OAuthAuth TokenStore 落 rivetHome()/auth——临时 RIVET_HOME 保证空 token
   // store（开发机真实 codex.json 会让 isAuthenticated=true 导致 flaky）。
+  // 2026-10-02 起同样隔离官方 CLI 导入源（~/.codex/auth.json 也会被读）。
   const origHome = process.env.RIVET_HOME
+  const origCliAuth = process.env.RIVET_CODEX_CLI_AUTH
   process.env.RIVET_HOME = join(tmpdir(), `rivet-b5-${Date.now()}`)
+  process.env.RIVET_CODEX_CLI_AUTH = join(tmpdir(), 'no-such-codex-cli-auth.json')
   try {
     const ctx = makeCtx('', undefined)
     ctx.config = {
@@ -91,6 +94,8 @@ test('B5: 未认证 oauth provider 不截胡裸别名——continue 扫到带 ke
   } finally {
     if (origHome === undefined) delete process.env.RIVET_HOME
     else process.env.RIVET_HOME = origHome
+    if (origCliAuth === undefined) delete process.env.RIVET_CODEX_CLI_AUTH
+    else process.env.RIVET_CODEX_CLI_AUTH = origCliAuth
   }
 })
 
@@ -366,10 +371,13 @@ test('listAllModels: env key 注入后 provider 出现', () => {
 
 test('listAllModels: 未认证 oauth provider 过滤（与 B5 同 isAuthenticated 语义）', () => {
   // RIVET_HOME 隔离：OAuthAuth TokenStore 读 rivetHome()/auth——开发机真实 codex.json
-  // 会让 isAuthenticated 语义不可控（B5 测试同款隔离）。已认证分支需真实 token，
+  // 会让 isAuthenticated 语义不可控（B5 测试同款隔离）。2026-10-02 起同样隔离
+  // 官方 CLI 导入源（~/.codex/auth.json 也会被读）。已认证分支需真实 token，
   // 此层不写假 store，由 providerHasUsableAuth 分支与 resolveModelSpec B5 对称覆盖。
   const origHome = process.env.RIVET_HOME
+  const origCliAuth = process.env.RIVET_CODEX_CLI_AUTH
   process.env.RIVET_HOME = join(tmpdir(), `rivet-picker-oauth-${Date.now()}`)
+  process.env.RIVET_CODEX_CLI_AUTH = join(tmpdir(), 'no-such-codex-cli-auth.json')
   try {
     const oauthProv = {
       name: 'oauthp', auth: { type: 'oauth', provider: 'codex' }, baseUrl: 'https://api.example.com',
@@ -381,6 +389,8 @@ test('listAllModels: 未认证 oauth provider 过滤（与 B5 同 isAuthenticate
   } finally {
     if (origHome === undefined) delete process.env.RIVET_HOME
     else process.env.RIVET_HOME = origHome
+    if (origCliAuth === undefined) delete process.env.RIVET_CODEX_CLI_AUTH
+    else process.env.RIVET_CODEX_CLI_AUTH = origCliAuth
   }
 })
 

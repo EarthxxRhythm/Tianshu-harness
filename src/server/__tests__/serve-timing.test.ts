@@ -14,6 +14,7 @@ import {
   PLUGIN_WARM_WAIT_CAP_MS,
   SERVE_TIMING_PREFIX,
   createServeTimingLogger,
+  formatServeStartExtra,
   formatServeTimingPhase,
   isServeTimingEnabled,
   resolveServeWarmDelayMs,
@@ -40,6 +41,12 @@ test('formatServeTimingPhase：固定形态 `[serve-timing] phase=<name> +<ms>[ 
   assert.equal(formatServeTimingPhase('listen', 1234.6), '[serve-timing] phase=listen +1235ms')
   assert.equal(formatServeTimingPhase('rehydrate', 12, 'sessions=146'), '[serve-timing] phase=rehydrate +12ms sessions=146')
   assert.match(formatServeTimingPhase('x', 0), new RegExp(`^${SERVE_TIMING_PREFIX.replace(/[[\]]/g, '\\$&')} phase=x \\+0ms$`))
+})
+
+test('formatServeStartExtra：uptime 为进程启动到 runServe，bootstrap 取不到时省略', () => {
+  assert.equal(formatServeStartExtra(42, 370.4, 35.6), 'pid=42 uptime=370ms bootstrap=36ms')
+  assert.equal(formatServeStartExtra(42, 370.4, undefined), 'pid=42 uptime=370ms')
+  assert.equal(formatServeStartExtra(42, 370.4, Number.NaN), 'pid=42 uptime=370ms')
 })
 
 test('createServeTimingLogger：相对创建时刻计时；关闭时不写 sink', () => {
@@ -196,6 +203,11 @@ test('serve.ts：阶段时间线覆盖 start / pro-module / rehydrate / routes /
     assert.match(serveSrc, new RegExp(`timing\\.mark\\('${phase}'`), `缺阶段 ${phase}`)
   }
   assert.match(serveSrc, /const timing = createServeTimingLogger\(isServeTimingEnabled\(opts\)\)/)
+  assert.match(
+    serveSrc,
+    /timing\.mark\('start', formatServeStartExtra\(process\.pid, performance\.now\(\), performance\.nodeTiming\?\.bootstrapComplete\)\)/,
+    'start 行要带进程启动到 runServe 的耗时',
+  )
   assert.match(serveSrc, /timing\.mark\('rehydrate', `sessions=\$\{sessions\.listAllSessions\(\)\.length\}`\)/)
   // 旧的 RIVET_SERVE_TIMING === '1' 门控 listen 行已并入阶段标记
   assert.doesNotMatch(serveSrc, /\[serve-timing\] listen ready/)

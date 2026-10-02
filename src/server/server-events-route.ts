@@ -17,6 +17,7 @@ import type { ServerEventBus } from './server-event-bus.js'
 import type { SseConnectionRegistry } from './sse-registry.js'
 import { SseStream } from './sse-stream.js'
 import { isAuthorizedRequest } from './auth.js'
+import { renewLease } from './parent-watchdog.js'
 import { allowedCorsOrigin } from './cors.js'
 
 export const SERVER_EVENTS_HEARTBEAT_MS = 5_000
@@ -59,6 +60,12 @@ export function buildServerEventsRoute(
       sse.send('health', { kind: 'health', ts: now(), data: opts.healthSnapshot() })
       unsubscribe = bus.subscribe((ev) => sse.send(ev.kind, ev))
       heartbeat = setInterval(() => {
+        // 心跳续租（2026-09-19 全链路推演缺口）：连接在 L41 已过认证——
+        // 活着的认证连接 = 在线客户端，心跳周期即续租周期。最小化场景
+        // （前端轮询停摆 refetchIntervalInBackground:false）下这是唯一
+        // 的活跃信号；连接断开 → res.on('close') → cleanup 停心跳 →
+        // 停止续租，宽限按空闲超时语义起算。
+        renewLease(120_000)
         sse.send('health', { kind: 'health', ts: now(), data: opts.healthSnapshot() })
       }, heartbeatMs)
       heartbeat.unref?.()

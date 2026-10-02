@@ -27,7 +27,11 @@ function makeSelf(initialUserMessage: string | null) {
     vigorState: null,
     config: {},
     traceStore: { toolFingerprints: [], events: [] },
-    session: { getTurnCount: () => 1, getEstimatedTokens: () => 100 },
+    // S1：recordToolHistory 现同时维护输出窗口观测器与只读流水（真实 AgentLoop
+    // 恒有这两个字段/实例；mock 需保持同一依赖面，否则窗口信号一接入就崩）。
+    outputWindow: { record: () => {} },
+    readOnlyStreak: 0,
+    session: { getTurnCount: () => 1, getEstimatedTokens: () => 100, getMainPathOutputTokens: () => 0 },
     getDoomLoopLevel: () => 'none',
     immuneHook: { run: () => ({}) },
     p3: {

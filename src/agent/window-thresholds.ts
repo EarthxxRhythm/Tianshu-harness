@@ -34,18 +34,26 @@ export const regressionLoopLimitForWindow = (contextWindow: number): number =>
   scaledThreshold(contextWindow, 5, 12)
 
 /**
- * B2 收敛轨迹门（会话 506a5e86 优化）：最近 window 个收敛 score 均值 >= bar
- * → 轨迹收敛 → B2 静默。score 来自 convergence-detector.evaluateConvergence
- * （[0,1]，越高越收敛）。bar=0.4 对齐 detector 的 L2 分档线（<=0.4 = L2）：
- * B2 静默区与 detector 的 L2+ 提醒严格不重叠，防双提醒叠罗汉（0.4-0.6 的
- * L1 区间 detector 仍会发轻度提醒，B2 不追加）。
+ * B2 收敛轨迹门（会话 506a5e86 优化；2026-10-02 S1 连带修正 bar 标定）：
+ * 最近 window 个收敛 score 均值 >= bar → 轨迹收敛 → B2 静默。score 来自
+ * convergence-detector.evaluateConvergence（[0,1]，越高越收敛）。
+ *
+ * bar=0.6 = detector 的 **L1 线**：只有 detector 对轨迹完全无话
+ * （score > 0.6，L1/L2/L3 均不触发）时才让 B2 静默。修正原因：旧 bar=0.4
+ * （对齐 L2 线，"让位给 detector"）的前提在 B2 的早期兜底区间不成立——
+ * L2 有 turn 门（1M nMid=34 / 200K=14，B2 却在 28/12 轮就介入），L1
+ * （0.4-0.6）无用户可见消费（纯内部评级，不注入提醒）。该区间 0.4-0.6
+ * 分数的会话在旧世界靠 S1 缺陷的分数漂移（长会话累计成本压低
+ * tokenEfficiency）隐性获得 B2 提醒；S1 修复（窗口增量口径）移除漂移后
+ * 暴露为"提醒真空"（turn-orchestrator-b2-mode 五个契约用例红）。新 bar 下
+ * 0.4-0.6 疑似区由 B2 有界补强（每 run 一次，不刷屏），> 0.6 真收敛静默。
  * 冷启动：样本 < minSamples 时返回 false（保守照发，旧行为）。
  */
 export function isB2ConvergingRecently(
   scoreHistory: readonly number[],
   minSamples = 2,
   window = 3,
-  bar = 0.4,
+  bar = 0.6,
 ): boolean {
   if (scoreHistory.length < minSamples) return false
   const recent = scoreHistory.slice(-window)

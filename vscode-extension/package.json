@@ -38,79 +38,160 @@
     "workspace"
   ],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onChatParticipant:tianshu.default",
+    "onLanguageModelChatProvider:tianshu"
+  ],
+  "enabledApiProposals": [
+    "defaultChatParticipant",
+    "chatParticipantAdditions",
+    "chatParticipantPrivate"
+  ],
   "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "tianshu",
+          "title": "天枢",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
     "views": {
       "explorer": [
         {
-          "id": "tianshu.launcher",
-          "name": "天枢"
-        },
-        {
           "id": "tianshu.changes",
           "name": "天枢变更"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "tianshu.launcher",
+          "name": "天枢"
         }
       ]
     },
     "commands": [
       {
         "command": "tianshu.newSession",
-        "title": "天枢: 新建会话"
+        "title": "新建会话",
+        "category": "天枢"
       },
       {
         "command": "tianshu.openInEditor",
-        "title": "天枢: 在编辑器中打开座舱"
+        "title": "在编辑器中打开座舱",
+        "category": "天枢"
       },
       {
         "command": "tianshu.restartSidecar",
-        "title": "天枢: 重启内核 sidecar"
+        "title": "重启内核 sidecar",
+        "category": "天枢"
       },
       {
         "command": "tianshu.showSidecarLog",
-        "title": "天枢: 查看内核日志"
+        "title": "查看内核日志",
+        "category": "天枢"
       },
       {
         "command": "tianshu.refreshChanges",
-        "title": "天枢: 刷新变更",
-        "icon": "$(refresh)"
+        "title": "刷新变更",
+        "icon": "$(refresh)",
+        "category": "天枢"
       },
       {
         "command": "tianshu.rollback",
-        "title": "天枢: 回滚到 checkpoint",
-        "icon": "$(discard)"
+        "title": "回滚到 checkpoint",
+        "icon": "$(discard)",
+        "category": "天枢"
       },
       {
         "command": "tianshu.sendSelection",
-        "title": "发送到天枢"
+        "title": "发送到聊天",
+        "category": "天枢"
       },
       {
         "command": "tianshu.inlineEdit",
-        "title": "天枢: 行内编辑 (Ctrl+K)"
+        "title": "行内编辑",
+        "category": "天枢"
       },
       {
         "command": "tianshu.acceptEdit",
-        "title": "天枢: 接受委托编辑"
+        "title": "接受委托编辑",
+        "category": "天枢"
       },
       {
         "command": "tianshu.rejectEdit",
-        "title": "天枢: 拒绝委托编辑"
+        "title": "拒绝委托编辑",
+        "category": "天枢"
       },
       {
         "command": "tianshu.generateCommitMessage",
-        "title": "天枢: 生成提交语",
-        "icon": "$(sparkle)"
+        "title": "生成提交语",
+        "icon": "$(sparkle)",
+        "category": "天枢"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "tianshu.default",
+        "name": "tianshu",
+        "fullName": "天枢",
+        "description": "与天枢 agent 对话：提问经本地 sidecar 的会话运行时回答。",
+        "isSticky": true,
+        "isDefault": true,
+        "modes": [
+          "ask",
+          "agent"
+        ],
+        "locations": [
+          "panel"
+        ]
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "tianshu",
+        "displayName": "天枢"
       }
     ],
     "keybindings": [
       {
         "command": "tianshu.inlineEdit",
-        "key": "ctrl+shift+k",
-        "mac": "cmd+shift+k",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
         "when": "editorTextFocus"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "tianshu.actions",
+        "label": "天枢"
       }
     ],
     "menus": {
       "editor/context": [
+        {
+          "command": "tianshu.sendSelection",
+          "group": "tianshu@1"
+        },
+        {
+          "command": "tianshu.inlineEdit",
+          "group": "tianshu@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "submenu": "tianshu.actions",
+          "group": "navigation@9"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "submenu": "tianshu.actions",
+          "group": "tianshu@1"
+        }
+      ],
+      "tianshu.actions": [
         {
           "command": "tianshu.sendSelection",
           "group": "tianshu@1"
@@ -137,6 +218,16 @@
           "command": "tianshu.generateCommitMessage",
           "when": "scmProvider == git",
           "group": "navigation@1"
+        },
+        {
+          "command": "tianshu.refreshChanges",
+          "when": "scmProvider == tianshu",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tianshu.rollback",
+          "when": "scmProvider == tianshu",
+          "group": "navigation@2"
         }
       ]
     },
@@ -167,7 +258,7 @@
     "@types/node": "^20.11.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.140.0",
     "esbuild": "^0.24.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -1,3 +1,4 @@
+import { sessionStateAdvice } from './runtime-advice-facts.js'
 import { cacheDiagnosticClass } from '../cache/cache-diagnostic-class.js'
 import type { AgentLoop } from './loop.js'
 import { TurnStreamController } from './turn-stream.js'
@@ -551,12 +552,14 @@ export function buildRuntimeSnapshot(self: AgentLoop, extra?: Partial<RuntimeHoo
 return {
       cwd: self.cwd,
       turn: self.session.getTurnCount(),
+      modelTurn: self.modelObservationTurn,
       recentToolHistory: self.recentToolHistory.map(h => ({
         tool: h.tool,
         status: h.status,
         target: h.target,
         argsHash: h.argsHash,
         bashActivity: h.bashActivity,
+        ...(h.verificationAttempted !== undefined ? { verificationAttempted: h.verificationAttempted, modelTurn: h.modelTurn } : {}),
       })),
       sensorium: self.sensorium,
       strategy: self.strategy,
@@ -578,6 +581,9 @@ return {
       // {true, undefined}), permanently blocking the reasoning-spiral hook.
       // Entries carry the turn number they were recorded in (recordToolHistory).
       lastTurnHadTools: self.recentToolHistory.some(h => h.turn === self.session.getTurnCount() - 1),
+      // S2 CCR 可达性：连续只读流水走**独立累计计数**（5 条窗口反算的上限是 5，
+      // 低于 P6 的 6/10 阈值 → 规则永不可达）。缺字段的消费方回落旧算法。
+      readOnlyStreak: self.readOnlyStreak,
       ...extra,
     }
 }
@@ -957,6 +963,7 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
     })(),
     userHooksBridge: userBridgeDeps,
     advisoryBus: self.advisoryBus,
+    adviceFacts: { getActiveToolNames: () => self.getActiveToolNames(), getContextBudget: () => self.getContextBudget(), getModel: () => self.config.promptEngine.getModel() },
     getJobs: () => self.jobs,
     getMonitors: () => self.monitors,
     sycophancyTrap: self.sycophancyTrap,
@@ -966,6 +973,7 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
     drainGateBlockedKinds: () => self.gateBlockedKinds.splice(0),
     // 多会话隔离：todo-reminder 经此读本会话 TodoStore（缺省回退全局 getTodos）。
     getTodos: self.config.getTodos,
+    getTodoTask: () => self.todoTaskContext,
     // 运行走查工件（付费版 v1 · T1）：computer_use 步骤时间线 → walkthrough 工件。
     walkthrough: {
       getArtifactStore: () => self.artifactStore,
@@ -1301,7 +1309,12 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     recordProviderOutcome: (ok) => { self.recordProviderOutcome(ok) },
 
     // === Sub-controllers ===
-    streamTurn: (params) => (self.persist ? self.persist.flushSessionBuffer().catch(() => {}).then(() => self.turnStream!.streamTurn(params)) : self.turnStream!.streamTurn(params)),
+    streamTurn: async params => {
+      if (self.persist) await self.persist.flushSessionBuffer().catch(() => {})
+      const result = await self.turnStream!.streamTurn(params)
+      if (!self.abortController?.signal.aborted && !result.streamError && !result.triggeredRule) self.advisoryReadback.markResponseComplete(self.modelObservationTurn)
+      return result
+    },
     executeBatch: (params) => self.toolExecution.executeBatch(params),
     completeTurn: (params) => self.turnCompletion.complete(params),
     appendTurnResult: (turn) => { self.planTraceCoordinator.appendTurnResult(turn) },
@@ -1324,6 +1337,7 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     submitAdvisory: (entry) => { self.advisoryBus.submit(entry) },
 
     // === W3 诊断态识别 ===
+    getRuntimeAdvice: () => sessionStateAdvice({ getActiveToolNames: () => self.getActiveToolNames(), getContextBudget: () => self.getContextBudget(), getModel: () => self.config.promptEngine.getModel() }),
     getActivityMode: () => classifyActivityMode(
       self.recentToolHistory,
       self.evidence.getState().filesModified.size,

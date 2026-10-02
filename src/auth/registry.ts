@@ -1,7 +1,11 @@
 import type { AuthProvider } from './types.js'
 import { ApiKeyAuth } from './api-key.js'
 import { OAuthAuth, type OAuthConfig } from './oauth-auth.js'
+import { TokenStore } from './token-store.js'
+import { skipCodexCliImport } from './codex-cli-auth.js'
 import type { AuthConfig } from '../config/schema.js'
+import { join } from 'node:path'
+import { rivetHome } from '../config/paths.js'
 
 const CODEX_OAUTH_CONFIG: OAuthConfig = {
   clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
@@ -52,4 +56,18 @@ export function createOAuthLoginAuth(provider: string, onUserCode?: (url: string
   const base = provider === 'codex' ? CODEX_OAUTH_CONFIG : null
   if (!base) throw new Error(`Unknown OAuth provider: ${provider}`)
   return new OAuthAuth({ ...base, ...(onUserCode ? { onUserCode } : {}) })
+}
+
+/**
+ * 登出 OAuth 型 provider：清掉本地 token store（codex 等），并立「不再从官方
+ * CLI 导入」的抑制标记——否则 ~/.codex/auth.json 还在，下一次 loadWithImport
+ * 会把刚登出的账号当场拉回来（登出永远无效）。用户重新走 PKCE 登录成功时
+ * 标记摘除（oauth-auth authenticate()）。返回是否真的执行了清除。
+ */
+export function clearOAuthLogin(provider: string): boolean {
+  if (provider !== 'codex') return false
+  const authDir = join(rivetHome(), 'auth')
+  new TokenStore(authDir, provider).clear()
+  skipCodexCliImport(authDir)
+  return true
 }

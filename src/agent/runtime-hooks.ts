@@ -29,9 +29,10 @@ export interface RuntimeToolEvent {
 }
 
 export interface RuntimeHookSnapshot {
+  modelTurn?: number
   cwd: string
   turn: number
-  recentToolHistory: Array<Pick<ToolHistoryEntry, 'tool' | 'status' | 'target' | 'argsHash' | 'errorClass' | 'bashActivity'>>
+  recentToolHistory: Array<Pick<ToolHistoryEntry, 'tool' | 'status' | 'target' | 'argsHash' | 'errorClass' | 'bashActivity' | 'verificationAttempted' | 'modelTurn'>>
   sensorium: Sensorium | null
   sensoriumInput?: SensoriumInput
   providerDegradationRatio?: number
@@ -62,6 +63,20 @@ export interface RuntimeHookSnapshot {
   /** Reasoning spiral guard: whether last turn had any tool calls.
    *  Derived from recentToolHistory in buildRuntimeSnapshot. */
   lastTurnHadTools?: boolean
+  /**
+   * S2 CCR 可达性：队尾连续只读工具调用数，**独立累计计数**（不受
+   * recentToolHistory 的 5 条容量限制）。
+   *
+   * 为什么不能从 recentToolHistory 反算：CCR 的 P6 阈值是 6（build）/
+   * 10（diagnostic），而 5 条窗口能反算出的 streak 上限就是 5 —— 规则在生产
+   * 容量下永不可达（缺陷本体）。判据与 classifyActivityMode 同源
+   * （convergence-detector.isReadOnlyToolCall），由 recordToolHistory 维护。
+   *
+   * 消费方：cognitive-capsule-router 的 extractRouteState 取
+   * `snapshot.readOnlyStreak ?? computeReadOnlyStreak(recentToolHistory)`
+   * （字段缺席 = 老装配，回落旧行为；不得默认成"停滞"）。
+   */
+  readOnlyStreak?: number
 }
 
 export interface RuntimePhaseChangeDetail {

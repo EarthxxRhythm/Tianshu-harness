@@ -17,15 +17,20 @@
  * main.ts 仍可直跑（桌面 sidecar / benchmark / 开发）且行为不变——它内部同样
  * 调用 early-routing，保证两条入口的路由与 --profile/--trust 副作用一致。
  */
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { enableCompileCache } from 'node:module'
-import { join } from 'node:path'
+import { cliCompileCacheDir, cliCompileCacheRoot, markCliCompileCacheUsed, pruneStaleCliCompileCaches } from './compile-cache.js'
 import { applyEarlyCliEnv, routeEarlyCli } from './early-routing.js'
 import { HELP_TEXT } from './help-text.js'
-import { formatVersionLine } from './version.js'
+import { currentInstallVersion, formatVersionLine } from './version.js'
 import { rivetHome } from '../config/paths.js'
 
-/** 编译缓存目录与桌面端同级：<RIVET_HOME>/cli/compile-cache（按内容哈希自动失效）。 */
+/**
+ * 编译缓存目录：<RIVET_HOME>/cli/compile-cache/<安装版本>。Node 只按内容哈希
+ * 失效、旧条目永不淘汰，故升级后首次运行清掉「当前 + 最近 N 个」以外的旧目录
+ * 与早期平铺文件；每次启动都刷新当前目录 mtime（Node 写内层子目录不会更新父
+ * 目录 mtime，不刷新则「最近」退化成「最近创建」）。细节见 ./compile-cache.ts。
+ */
 function enableCliCompileCache(): void {
   if (typeof enableCompileCache !== 'function') return
   // 桌面壳 spawn sidecar 前已注入 NODE_COMPILE_CACHE（lib.rs::spawn_from_spec）：
@@ -33,8 +38,20 @@ function enableCliCompileCache(): void {
   // <RIVET_HOME>/cli/compile-cache 这个用不到的目录。
   if (process.env.NODE_COMPILE_CACHE) return
   try {
-    const dir = join(rivetHome(), 'cli', 'compile-cache')
+    const home = rivetHome()
+    const root = cliCompileCacheRoot(home)
+    const dir = cliCompileCacheDir(home, currentInstallVersion())
+    const firstRunForVersion = !existsSync(dir)
     mkdirSync(dir, { recursive: true })
+    // 每次启动都刷新 mtime：Node 把条目写在内层子目录，父目录 mtime 不会自己变。
+    markCliCompileCacheUsed(dir)
+    if (firstRunForVersion) {
+      try {
+        pruneStaleCliCompileCaches(root, dir)
+      } catch {
+        // 清理失败不影响缓存启用；旧目录留给下次。
+      }
+    }
     enableCompileCache(dir)
     return
   } catch {

@@ -1008,6 +1008,7 @@ export interface SearchConfigSnapshot {
   braveApiKeyEnv: string
   tavilyApiKeyEnv: string
   bochaApiKeyEnv: string
+  serplyApiKeyEnv: string
   timeoutMs: number
   region: string
   /** 各 backend 的 key 状态（掩码，不含明文）——供 UI 显示徽章。 */
@@ -1015,7 +1016,7 @@ export interface SearchConfigSnapshot {
 }
 
 /** 需 key 的 backend 名（bing/ddg 免 key，不在此列）。 */
-const KEYED_SEARCH_BACKENDS = ['bocha', 'brave', 'tavily'] as const
+const KEYED_SEARCH_BACKENDS = ['bocha', 'brave', 'tavily', 'serply'] as const
 
 /**
  * 读取用户全局 config 的 search 段。inline key 不返回明文，只返回 keyStatus
@@ -1032,6 +1033,7 @@ export function getSearchConfig(): SearchConfigSnapshot {
     braveApiKeyEnv: s.braveApiKeyEnv,
     tavilyApiKeyEnv: s.tavilyApiKeyEnv,
     bochaApiKeyEnv: s.bochaApiKeyEnv,
+    serplyApiKeyEnv: s.serplyApiKeyEnv,
     timeoutMs: s.timeoutMs,
     region: s.region ?? '',
     keyStatus,

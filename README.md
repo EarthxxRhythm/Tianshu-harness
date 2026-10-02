@@ -29,7 +29,7 @@
   <img src="https://img.shields.io/github/v/release/huiliyi37/Tianshu-harness?color=8B5CF6&label=Release&logo=github&style=for-the-badge" alt="GitHub release">
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
-  <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-19%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
   <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://atomgit.com/huiliyi37/Tianshu-harness"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/star/badge.svg" alt="AtomGit Star"></a>
   <a href="https://github.com/huiliyi37/Tianshu-harness/releases"><img src="https://img.shields.io/github/downloads/huiliyi37/Tianshu-harness/total?logo=github&label=downloads" alt="GitHub downloads"></a>
@@ -59,8 +59,8 @@ Application / TUI / IDE / Desktop
 
 - **稳定交付，不虚报完成** —— 这是核心。任务契约（TaskContract）钉住全局目标，交付门禁要求「完成」必须带运行时证据（测试、diff、验证命令），收敛检测独立判断认知轨迹是否还在推进——模型说完成 ≠ 运行时确认完成。
 - **终端 × 桌面，一个内核** —— 纯 ANSI 自研 TUI（`tianshu`）与 Tauri 桌面端（macOS / Windows / Linux）共用同一 agent 内核，两端能力一致。
-- **认知虚拟机（CVM）** —— 72 个运行时 hook 横跨 5 大阶段，在模型输出与真实动作之间加一层可观测、可纠偏的认知运行时（[理念文档](docs/reference/cvm-cognitive-runtime.md) · [A/B 实证](docs/CVM运行时对Agent模型的实证影响.md)）。
-- **前缀缓存引擎，全模型适用** —— 冻结前缀 + 增量 appendix + 边界压缩，对所有支持前缀缓存的模型生效：各家模型长会话实测稳态命中率均在 **98–99%**（DeepSeek V4 另有针对性优化），显著降低 token 成本。
+- **认知虚拟机（CVM）** —— 75 个运行时 hook 横跨 5 大阶段，在模型输出与真实动作之间加一层可观测、可纠偏的认知运行时（[理念文档](docs/reference/cvm-cognitive-runtime.md) · [A/B 实证](docs/CVM运行时对Agent模型的实证影响.md)）。
+- **前缀缓存引擎，全模型适用** —— 冻结前缀 + 增量 appendix + 边界压缩，对所有支持前缀缓存的模型生效：各家模型长会话实测稳态命中率均在 **95–99%**（DeepSeek V4 另有针对性优化），显著降低 token 成本。
 
 <p align="center">
   <img src="docs/brand/assets/tianshu-harness-screenshot.png" alt="天枢 TUI（终端版）" width="49%">
@@ -126,7 +126,7 @@ CVM 不改权重、不让模型变成确定性程序，而是在概率认知之�
 外环（运行时监管）：observe → measure → evaluate → gate → verify → continue / correct / halt
 ```
 
-落到工程上是四层防御深度：信念宪法（static prompt）→ Courage Hook（preTurn）→ Sensorium（每 turn <1ms 六维状态感知）→ RuntimeHookPipeline（72 hooks，trap-and-emulate 拦截退化行为）。全局目标有独立状态（TaskContract），完成必须有运行时证据（Evidence），坍缩会被独立检测（Convergence / doom-loop）。
+落到工程上是四层防御深度：信念宪法（static prompt）→ Courage Hook（preTurn）→ Sensorium（每 turn <1ms 六维状态感知）→ RuntimeHookPipeline（75 hooks，trap-and-emulate 拦截退化行为）。全局目标有独立状态（TaskContract），完成必须有运行时证据（Evidence），坍缩会被独立检测（Convergence / doom-loop）。
 
 ### 星域：模型的独立认知结构
 
@@ -136,7 +136,17 @@ CVM 不改权重、不让模型变成确定性程序，而是在概率认知之�
 
 ### 工程质量
 
-CLI 源码 1,078 文件 / 257,623 行，测试 1,361 文件 / **16,471 用例**（node:test，测试 : 源码 ≈ 0.99:1），`tsc` strict + `noUncheckedIndexedAccess`，事故修复必带回归测试。完整口径与复现命令见 [工程质量指标](docs/engineering-metrics.md)。
+截至 **2026-09-30** 的量级快照（行数每天都在动，差几百行正常）：
+
+| 部分 | 规模 |
+|------|------|
+| `src/` 源码 | 约 1,256 文件 / 30 万行（最大的 `agent/` 有 483 个文件） |
+| `src/` 测试 | 约 1,592 文件 / 31 万行（node:test，与源码约 1:1） |
+| `desktop/src` | 约 450 文件 / 9.6 万行（React），另有约 1.1 万行 Rust |
+| `vscode-extension/src` | 17 文件 / 约 2,700 行 |
+| 仓库 | 2026-05-15 创建，至今约 4 个半月，共 8,008 个提交，近 30 天 1,769 个 |
+
+`tsc` strict + `noUncheckedIndexedAccess`，事故修复必带回归测试。完整口径、里程碑与复现命令见 [工程质量指标](docs/engineering-metrics.md)。
 
 ## ✨ 核心特性
 
@@ -152,6 +162,7 @@ CLI 源码 1,078 文件 / 257,623 行，测试 1,361 文件 / **16,471 用例**�
 - **MCP 与 Skills** —— 外部工具服务器接入 + 可复用工作流剧本，渐进披露。[细节](docs/user-guide.md#mcpmodel-context-protocol)
 - **T9 自研 TUI** —— 纯 ANSI 零依赖：GlanceBar 状态栏、流式中打断、命令面板、Cockpit 驾驶舱、内联图片。[细节](docs/user-guide.md#终端-uitui)
 - **桌面端增强** —— 集成终端、主题工作室、语音输入（本地 whisper）、手机遥控审批、多会话并发。[桌面端指南](docs/desktop-guide.md)
+- **WSL 连接式运行时**（Windows）—— 一键连上 WSL 内的运行时，会话、文件读写与命令执行都在 Linux 侧进行；断开自动清理，两侧版本独立升级互不影响。[细节](docs/desktop-guide.md#wsl-连接式运行时windows)
 - **Lean 资源档** —— 低内存/低磁盘场景的精简工具集与会话池收紧，可按星域覆盖。[细节](docs/user-guide.md#lean-资源档低内存--低磁盘)
 
 ## 🚀 快速开始
@@ -193,7 +204,7 @@ tianshu            # 看到 〉 提示符即就绪
 
 接下来它会自己 grep、读文件、改代码、跑测试——每一步都有对应的工具调用，不是"说完就结束"。默认权限档是**自动**：低风险动作直接执行，高风险动作会停下来问你（档位与会话内切换见下方 [权限模式](#权限模式)）。
 
-### 做完之后看两处
+### 做完之后看三处
 
 **① 交付报告** —— 收尾时天枢会调用 `deliver_task`，输出一块交付报告：交付门状态（GREEN / YELLOW / RED）、本次改动的文件、跑过的验证、逐条完成度审计。「完成」必须有证据；没有证据的收尾会被门禁拦下。
 
@@ -207,6 +218,15 @@ tianshu            # 看到 〉 提示符即就绪
 | `/cockpit safety` | 风险等级与空转检测 |
 
 不带参数是总览，`/cockpit off` 关闭。
+
+**③ CVM 拦截台账** —— 运行时的每次拦截都逐条落在会话的 `sensorium.jsonl`。落点用 `tianshu logs` 查（会列出数据根与各日志路径）：
+
+```bash
+# 按分类复算本会话的拦截次数
+jq -r 'select(.kind=="cvm-vector-decision") | .classification' sensorium.jsonl | sort | uniq -c
+```
+
+台账默认只写轻量行（`vitals-lite` / `cognitive-frame-lite`）；要看全量拦截记录，启动前设 `RIVET_DEBUG_TELEMETRY=1`。分类枚举与复算口径见[指标观测 harness](docs/reference/observability-harness.md)。
 
 ### 无界面模式（脚本 / CI 集成）
 
@@ -279,7 +299,7 @@ Node.js 24 · TypeScript strict（`noUncheckedIndexedAccess`）· T9 ANSI 渲染
 
 ```bash
 npm run typecheck    # 类型检查
-npm test             # 所有测试（16,000+ 用例）
+npm test             # 所有测试（19,000+ 用例）
 npm run build        # tsup 打包 + 原生/wasm 载荷落位
 node dist/cli/entry.js
 ```

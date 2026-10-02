@@ -669,7 +669,7 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
     key: 'codex',
     label: 'Codex',
     description: 'OpenAI Codex：OAuth 登录，旗舰推理',
-    defaultModelId: 'gpt-5.6-sol',
+    defaultModelId: 'gpt-6.1-sol',
     provider: {
       name: 'codex',
       baseUrl: 'https://chatgpt.com/backend-api/codex',
@@ -686,8 +686,21 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
       maxTokens: 128000,
       models: [
         {
+          id: 'gpt-6.1-sol',
+          description: 'OpenAI 旗舰（Sol 6.1），视觉支持',
+          contextWindow: 1_050_000,
+          maxTokens: 128000,
+          reasoningEffort: 'max',
+          tier: 'strong',
+          supportsVision: true,
+          // 订阅折算价沿用 5.6-sol（codex 走 ChatGPT 订阅，pricing 只供成本展示）。
+          pricing: { input: 1.0, output: 4.0, cacheRead: 0.5, cacheWrite: 1.0 },
+        },
+        {
+          // 上一代仍可用（2026-10-02 实测 codex 后端 200）；6.1-terra/luna 在
+          // ChatGPT 账号侧被后端明确拒绝（"not supported when using Codex"），不入列。
           id: 'gpt-5.6-sol',
-          description: 'OpenAI 旗舰（Sol），视觉支持',
+          description: 'OpenAI 上代旗舰（Sol 5.6），视觉支持',
           contextWindow: 1_050_000,
           maxTokens: 128000,
           reasoningEffort: 'max',

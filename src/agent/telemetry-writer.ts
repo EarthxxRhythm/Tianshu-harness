@@ -47,9 +47,18 @@ export const ADVISORY_UNRESOLVED_KIND = 'advisory-unresolved'
 /** meridian 索引队列单项软超时（2026-09-08 follow-up）：索引挂起被跳过时
  *  记一条 lite 遥测，含 target/kind/累计次数。 */
 export const MERIDIAN_INDEX_ITEM_TIMEOUT_KIND = 'meridian-index-item-timeout'
+/** CVM-vector 决策台账（shadow 评估唯一数据源）。**默认落盘**——不落则
+ *  shadow 决策永远零数据（同 advisory-outcome 枯竭教训，实测 2026-09-25→10-02
+ *  全窗口 0 条），shadow→active 晋级没有证据源，observability-harness.md §2.5
+ *  的复算命令默认返回空。 */
+export const CVM_VECTOR_DECISION_KIND = 'cvm-vector-decision'
 
-/** RIVET_DEBUG_TELEMETRY 未开时仍放行的轻量 kind 白名单（每条单行 <200B）。 */
+/** RIVET_DEBUG_TELEMETRY 未开时仍放行的轻量 kind 白名单（典型单行 <200B）。
+ *  cvm-vector-decision 是已知的超限例外：决策记录含 facts/candidateKey/yielded，
+ *  三代表形状实测 186/211/317B（2026-10-02）——完整上下文是 shadow→active
+ *  晋级回放的证据底座，超限接受、不裁剪（量级 ≤1 行/轮，有规则冷却）。 */
 const LITE_KINDS: ReadonlySet<string> = new Set([
+  'phase-source',
   VITALS_LITE_KIND,
   PERF_SUMMARY_KIND,
   COGNITIVE_FRAME_LITE_KIND,
@@ -57,6 +66,7 @@ const LITE_KINDS: ReadonlySet<string> = new Set([
   ADVISORY_HOLDOUT_KIND,
   ADVISORY_UNRESOLVED_KIND,
   MERIDIAN_INDEX_ITEM_TIMEOUT_KIND,
+  CVM_VECTOR_DECISION_KIND,
 ])
 
 export function createTelemetryWriter(cwd: string, sessionId?: string): TelemetryWriter {

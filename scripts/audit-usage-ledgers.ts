@@ -24,6 +24,7 @@
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { sessionsDir } from '../src/config/paths.js'
+import { attemptDedupeKey, isBilledCacheLogEvent } from '../src/cache/usage-aggregator.js'
 
 // ── 参数 ─────────────────────────────────────────────────────────
 const argv = process.argv.slice(2)
@@ -42,6 +43,7 @@ type Verdict =
   | 'aligned'
   | 'continuation-reset'   // 多段（续跑重置）：meta ≈ 末段——回种修复前的历史形态
   | 'undercount-anomaly'   // meta < log 且非干净的末段重置——孤儿缓存/未刷尾/段交错
+  | 'in-progress'          // 未结束会话（meta.status='active'）的 meta 滞后——收尾 drain 前属预期，非回归
   | 'overcount'            // meta > log——理论上不可能，出现即硬 bug
   | 'no-log'               // 有 meta 无 cache-log（老会话/侧路零调用）
   | 'no-meta'              // 有 cache-log 无 meta
@@ -60,14 +62,27 @@ interface SessionAudit {
   updatedAt: number
 }
 
-// ── cache-log 解析（与 usage-aggregator 同口径：主行 + side_path 计费行）──
+// ── cache-log 解析（与 usage-aggregator.parseUsageRows **同口径，共用判据**）──
+// 计费行 = 主行 + side_path + retry（stream_attempt_aborted，provider charged），
+// 且同一 attempt（provider×model×requestId×attemptId）重复落行只计一次
+// （保留较后的落行——逆序迭代 + 去重，与 aggregator 同构）。
+// 历史缺陷（2026-10-02 第三批修复）：本地曾自写 filter 漏掉 retry 行，
+// 把计入 retry 的 meta 误判为 overcount。
 function parseUsageRows(path: string): UsageRow[] {
+  const lines = readFileSync(path, 'utf8').split('\n')
+  const attempts = new Set<string>()
   const rows: UsageRow[] = []
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!
     if (!line.trim()) continue
     let r: Record<string, unknown>
     try { r = JSON.parse(line) } catch { continue }
-    if (r.event !== undefined && r.event !== 'side_path') continue
+    const dedupeKey = attemptDedupeKey(r)
+    if (dedupeKey !== undefined) {
+      if (attempts.has(dedupeKey)) continue
+      attempts.add(dedupeKey)
+    }
+    if (!isBilledCacheLogEvent(r.event)) continue
     const input = r.input
     const t = r.t
     if (typeof input !== 'number' || typeof t !== 'number') continue
@@ -78,6 +93,7 @@ function parseUsageRows(path: string): UsageRow[] {
       output: typeof r.output === 'number' ? r.output : 0,
     })
   }
+  rows.reverse()
   return rows
 }
 
@@ -98,13 +114,29 @@ function countSegments(rows: UsageRow[]): { segments: number; lastSegInput: numb
   return { segments, lastSegInput }
 }
 
-function classify(metaPrompt: number, logInput: number, segments: number, lastSegInput: number): Verdict {
+/** in-progress 的「仍在活跃」窗口：超过该时长没有 meta 更新即视为进程已停
+ *  （收尾 drain 不会再发生），欠账回落 anomaly 暴露。阈值保守估计——正常
+ *  退出的会话会 drain 成 aligned，欠账的 stale-active 只会是「死了没刷尾」；
+ *  24h 内误判为 in-progress 的，超窗后的下次审计会自然翻出，不会永久吞。 */
+export const IN_PROGRESS_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+export function classify(metaPrompt: number, logInput: number, segments: number, lastSegInput: number, metaStatus?: string, lastActivityMs?: number): Verdict {
   // 容差：绝对 2000 或 1%，取大——覆盖 side_path 行计数差与四舍五入。
   const tol = Math.max(2_000, logInput * 0.01)
   if (Math.abs(metaPrompt - logInput) <= tol) return 'aligned'
   if (metaPrompt > logInput + tol) return 'overcount'
   if (segments > 1 && Math.abs(metaPrompt - lastSegInput) <= Math.max(5_000, lastSegInput * 0.02)) {
     return 'continuation-reset'
+  }
+  // 未结束（meta.status='active'）**且最近仍在活动**的会话：meta 是中途刷盘
+  // 快照，低于 cache-log 终身合计是机制性滞后（收尾 drain 落终值）——属预期。
+  // 注：主会话的 status 永不翻终态（session-persist.initMetadata 固定 active，
+  // 全仓唯一写 completed 的路径在 worker-session）——单靠 status 会把「死了
+  // 没 drain」的永久欠账也吞掉。所以要求「最近活动」：超窗无更新即回落
+  // anomaly 暴露未刷尾（2026-10-02 二轮修正，提交后审查发现）。
+  // lastActivityMs 未知（meta 损坏/无时间戳）时同样回落 anomaly——宁可暴露。
+  if (metaStatus === 'active' && lastActivityMs !== undefined && Date.now() - lastActivityMs < IN_PROGRESS_MAX_AGE_MS) {
+    return 'in-progress'
   }
   return 'undercount-anomaly'
 }
@@ -125,12 +157,14 @@ function auditSessionDir(parent: string, sid: string, slug: string): void {
   if (!hasLog && !hasMeta) return
 
   let metaPrompt = 0, metaCompletion = 0, updatedAt = 0
+  let metaStatus: string | undefined
   if (hasMeta) {
     try {
       const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
       metaPrompt = meta?.tokenUsage?.prompt ?? 0
       metaCompletion = meta?.tokenUsage?.completion ?? 0
       updatedAt = meta?.updatedAt ?? 0
+      metaStatus = typeof meta?.status === 'string' ? meta.status : undefined
     } catch { /* 坏 meta 当 0 处理，归类自然进欠账 */ }
   }
 
@@ -143,10 +177,10 @@ function auditSessionDir(parent: string, sid: string, slug: string): void {
   const logInput = rows.reduce((s, r) => s + r.input, 0)
   const logOutput = rows.reduce((s, r) => s + r.output, 0)
   const { segments, lastSegInput } = countSegments(rows)
+  if (!updatedAt) { try { updatedAt = Math.floor(statSync(logPath).mtimeMs) } catch { /* 0 即可 */ } }
   const verdict: Verdict = !hasMeta
     ? 'no-meta'
-    : classify(metaPrompt, logInput, segments, lastSegInput)
-  if (!updatedAt) { try { updatedAt = Math.floor(statSync(logPath).mtimeMs) } catch { /* 0 即可 */ } }
+    : classify(metaPrompt, logInput, segments, lastSegInput, metaStatus, updatedAt || undefined)
   audits.push({ slug, sid, logInput, logOutput, metaPrompt, metaCompletion, segments, lastSegInput, delta: metaPrompt - logInput, verdict, updatedAt })
 }
 
@@ -160,6 +194,12 @@ for (const dir of listDirs(ROOT)) {
 }
 
 // ── 汇总输出 ─────────────────────────────────────────────────────
+// 同名会话（sid）的目录计数——worker 换 worktree 续跑时，同名目录可分布在
+// 多个 slug 下：meta 是跨段累积账、各目录 log 只含自己段。overcount 排查需要
+// 它区分「跨目录续跑（非 bug）」与真超账。
+const sidDirCounts = new Map<string, number>()
+for (const a of audits) sidDirCounts.set(a.sid, (sidDirCounts.get(a.sid) ?? 0) + 1)
+
 const byVerdict = new Map<Verdict, number>()
 for (const a of audits) byVerdict.set(a.verdict, (byVerdict.get(a.verdict) ?? 0) + 1)
 
@@ -182,6 +222,15 @@ if (JSON_MODE) {
     },
     verdicts: Object.fromEntries(byVerdict),
     topDeltas: [...audits].sort((a, b) => a.delta - b.delta).slice(0, TOP),
+    overcounts: audits.filter(a => a.verdict === 'overcount').map(a => ({
+      sid: a.sid,
+      slug: a.slug,
+      logInput: a.logInput,
+      metaPrompt: a.metaPrompt,
+      delta: a.delta,
+      /** 同名会话目录总数：>1 = 跨目录续跑可解释（meta 累积 vs 分段 log），先核 sibling 再判 bug。 */
+      dirCount: sidDirCounts.get(a.sid) ?? 1,
+    })),
   }, null, 2))
   process.exit(0)
 }
@@ -195,6 +244,7 @@ const verdictLabel: Record<Verdict, string> = {
   'aligned': '对齐（|Δ| ≤ max(2k, 1%)）',
   'continuation-reset': '续跑重置（多段，meta≈末段——回种修复前的历史形态）',
   'undercount-anomaly': '欠账未解释（含单段欠账与多段但不匹配末段——孤儿缓存/未刷尾，修复后应为零）',
+  'in-progress': '进行中（active 且 24h 内有活动——收尾 drain 前 meta 滞后属预期，非回归）',
   'overcount': '超账（meta>log，理论上不可能，出现即 bug）',
   'no-log': '有 meta 无 cache-log',
   'no-meta': '有 cache-log 无 meta',
@@ -215,8 +265,14 @@ if (offenders.length > 0 && offenders[0]!.delta < -2_000) {
 }
 const over = audits.filter(a => a.verdict === 'overcount')
 if (over.length > 0) {
-  console.log(`\n⚠ 超账 ${over.length} 个（meta > log）——理论上不可能，逐一排查：`)
+  console.log(`\n⚠ 超账 ${over.length} 个（meta > log）——已知成因两条，先核对再定性：`)
+  console.log('  a) 同名会话跨目录续跑（worker 换 worktree）：meta 累积、各目录 log 分段——核对 dirCount>1 与 sibling；')
+  console.log('  b) 真超账（重复入账等）——dirCount=1 时按 bug 排查。')
   for (const a of over.slice(0, TOP)) {
-    console.log(`  ${a.sid}  log=${fmt(a.logInput)} meta=${fmt(a.metaPrompt)} Δ=+${fmt(a.delta)}`)
+    const dirCount = sidDirCounts.get(a.sid) ?? 1
+    const hint = dirCount > 1
+      ? `dirCount=${dirCount}（同名会话存在多目录——跨目录续跑可解释）`
+      : 'dirCount=1（无同名目录——按真超账排查）'
+    console.log(`  ${a.sid}  log=${fmt(a.logInput)} meta=${fmt(a.metaPrompt)} Δ=+${fmt(a.delta)}  ${hint}`)
   }
 }

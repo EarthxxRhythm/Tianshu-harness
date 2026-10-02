@@ -29,7 +29,7 @@
   <img src="https://img.shields.io/github/v/release/huiliyi37/Tianshu-harness?color=8B5CF6&label=Release&logo=github&style=for-the-badge" alt="GitHub release">
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
-  <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-19%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
   <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://atomgit.com/huiliyi37/Tianshu-harness"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/star/badge.svg" alt="AtomGit Star"></a>
   <a href="https://github.com/huiliyi37/Tianshu-harness/releases"><img src="https://img.shields.io/github/downloads/huiliyi37/Tianshu-harness/total?logo=github&label=downloads" alt="GitHub downloads"></a>
@@ -48,7 +48,7 @@
 > **天枢**는 TypeScript로 작성된 코딩 에이전트 런타임입니다. **터미널 TUI**와 **데스크톱 GUI**가 동일한 커널을 공유하며, 모델이 질문에 답하는 것에 그치지 않고, 인지 가드레일·멀티에이전트 오케스트레이션·DeepSeek V4 프리픽스 캐시에 맞춰 설계된 저비용 장대 세션을 갖추고 다단계 코딩 작업을 계속 완수할 수 있게 합니다.
 
 - **터미널 × 데스크톱, 하나의 커널** —— 순수 ANSI 자체 제작 TUI（`tianshu`）와 Tauri 데스크톱（macOS / Windows / Linux）이 동일한 에이전트 커널을 공유합니다. 양쪽의 능력은 동일하며 사용 시나리오에 따라 전환할 수 있습니다.
-- **인지 가상 머신（CVM）** —— 72개의 런타임 훅이 5대 단계에 걸쳐 있어, 모델 출력과 실제 행동 사이에 관측 가능하고 바로잡을 수 있는 인지 런타임을 둡니다（[A/B 실증](docs/CVM运行时对Agent模型的实证影响.md)）.
+- **인지 가상 머신（CVM）** —— 75개의 런타임 훅이 5대 단계에 걸쳐 있어, 모델 출력과 실제 행동 사이에 관측 가능하고 바로잡을 수 있는 인지 런타임을 둡니다（[A/B 실증](docs/CVM运行时对Agent模型的实证影响.md)）.
 - **멀티에이전트 오케스트레이션** —— 가벼운 `/scout` 읽기 전용 정찰, 병렬 `/team` 시공부터 `/council` 다중 좌석 회진, `/galaxy` 다차원 공략까지. 복잡한 작업은 파(wave) 단위로 실행하며 파마다 검수합니다.
 - **통합 프로젝트 메모리** —— 프로젝트 지식은 `.rivet/knowledge/memory.jsonl`에 기록됩니다. 자동 주입은 거버넌스/제약 계열 메모리에만 한정되며, 과거 문제와 문서는 명시적 recall을 통해서만 들어옵니다——새 작업을 납치하지 않습니다.
 - **프리픽스 캐시 최우선** —— 동결 프리픽스 + 증분 appendix + 경계 압축으로 DeepSeek V4 장대 세션에서 실측 정상 적중률 **95–99%**를 유지하여 token 비용을 크게 낮춥니다.
@@ -116,7 +116,7 @@ CVM은 모델을「더 똑똑하게」만드는 것이 아니라 4계층 방어 
 Layer 1: 信念宪法（static prompt）      → "你应该质疑、验证、拒绝"      [A/B 已证]
 Layer 2: Courage Hook（preTurn）        → 高信心时鼓励独立判断          [A/B 已证]
 Layer 3: Sensorium（每 turn <1ms）      → 六维状态感知，驱动策略切换     [Wave 7-8 已证]
-Layer 4: RuntimeHookPipeline（72 hooks） → trap-and-emulate 拦截退化行为 [全管线运行中]
+Layer 4: RuntimeHookPipeline（75 hooks） → trap-and-emulate 拦截退化行为 [全管线运行中]
 ```
 
 ### 독립된 인지: 星域은 롤플레이가 아니다
@@ -135,14 +135,15 @@ Layer 4: RuntimeHookPipeline（72 hooks） → trap-and-emulate 拦截退化行�
 
 | 지표 | 수치 |
 |------|------|
-| CLI 소스코드（TypeScript, 테스트 제외） | 1,078 파일 / 257,623 줄 |
-| 테스트 코드 | 1,361 파일 / 256,001 줄 |
-| 테스트 케이스（node:test, 정적 선언 기준） | **16,471**, 테스트 : 소스 ≈ **0.99 : 1** |
-| 누적 커밋 | **6,178**（main 브랜치; 2026-05-15 리포지토리 생성, 105일） |
+| `src/` 소스（TypeScript, 테스트 제외） | 약 1,256 파일 / 30만 줄（가장 큰 `agent/`는 483 파일） |
+| `src/` 테스트 | 약 1,592 파일 / 31만 줄（node:test, 소스와 약 1:1） |
+| `desktop/src` | 약 450 파일 / 9.6만 줄（React）, 별도로 Rust 약 1.1만 줄 |
+| `vscode-extension/src` | 17 파일 / 약 2,700 줄 |
+| 누적 커밋 | **8,008**（2026-05-15 생성, 약 4.5개월; 최근 30일 1,769） |
 | 타입 체크 | `tsc` strict + `noUncheckedIndexedAccess` |
 | 프리픽스 캐시 적중률 | 장대 세션 정상 상태 실측 95–99% |
 
-코딩 에이전트의 핵심 로직（멀티턴 루프, 도구 파이프라인, 컨텍스트 압축）은 테스트가 어렵기로 유명하고, 오픈소스 에이전트 프로젝트는 일반적으로 테스트 커버리지가 얇습니다——본 프로젝트는 테스트와 소스를 동량으로 유지하고 사고 수정에는 반드시 회귀 테스트를 붙입니다. 테스트:소스 줄 수 비는 오랫동안 0.93–0.99를 유지하며 규모가 커져도 희석되지 않았습니다（위 표는 2026-08-28 실측 스냅샷）. 완전한 통계 기준·반복 마일스톤·재현 명령어는 [엔지니어링 품질 지표](docs/engineering-metrics.md)를 참조하세요.
+코딩 에이전트의 핵심 로직（멀티턴 루프, 도구 파이프라인, 컨텍스트 압축）은 테스트가 어렵기로 유명하고, 오픈소스 에이전트 프로젝트는 일반적으로 테스트 커버리지가 얇습니다——본 프로젝트는 테스트와 소스를 동량으로 유지하고 사고 수정에는 반드시 회귀 테스트를 붙입니다. 테스트:소스 줄 수 비는 1:1 근처를 유지하며 규모가 커져도 희석되지 않았습니다（이전 슬라이스는 0.93–0.99; 위 표는 2026-09-30 어림 스냅샷）. 완전한 통계 기준·반복 마일스톤·재현 명령어는 [엔지니어링 품질 지표](docs/engineering-metrics.md)를 참조하세요.
 
 ## 🚀 빠른 시작
 
@@ -608,6 +609,7 @@ TUI는 CLI의 기본 표면입니다. 데스크톱 앱（Tauri）과 VS Code/Cur
 - **sidecar 메모리 적응**: 힙 상한을 머신 메모리별로 자동 분급（8G→2G / 16G→4G / 32G→6G / 64G+→8G, `RIVET_SIDECAR_HEAP_MB`로 덮어쓰기 가능）, ≤8GB 머신은 자동으로 lean 리소스 단계
 - **watchdog 자동 복구**: 경계 정체 시 자동으로 이어 실행, 데스크톱 타임라인에서 복구 이벤트를 볼 수 있습니다（⟳ 자동 복구 / ⏹ 할당량 소진）
 - **다중 세션 동시**: 탭 바에서 여러 세션 관리, 각각 독립 cwd + 모델 + 승인 모드
+- **WSL 연결 런타임** (Windows): 원클릭으로 WSL 내부에서 실행되는 런타임에 연결합니다. 세션, 파일 읽기/쓰기, 명령 실행이 모두 Linux 측에서 이루어집니다. 연결을 끊으면 WSL 측 프로세스가 자동으로 정리됩니다. 양측은 독립적으로 업그레이드할 수 있습니다 — 자세한 내용은 [데스크톱 사용자 가이드](docs/desktop-guide.md)를 참조하세요.
 - **기능 패널**（왼쪽 바 `⌘1…9` 전환）: Mission Control（다중 세션 콘솔）, Inbox（받은 편지함）, Automations（정기 작업）, Skills / Hooks 관리, Git / GitHub, Changes（변경 검토）, Delegation（파견 함대와 팀 wave DAG）, Cockpit 운전석
 - **Popout 독립 창**: 단일 세션 스레드를 독립 창으로 팝아웃, 멀티 스크린 병행
 - **JobsDock / TodoDock 상주 서랍**: 백그라운드 작업 도킹 바（로그 펼치기 / Kill / 터미널에서 열기）, 탭 간 상주 todo
@@ -921,7 +923,7 @@ Node.js 24 · TypeScript strict（`noUncheckedIndexedAccess`）· T9 ANSI 렌더
 
 ```bash
 npm run typecheck                                    # 类型检查
-npm test                                             # 所有测试（16,000+ 用例）
+npm test                                             # 所有测试（19,000+ 用例）
 npm run build                                        # tsup 打包 + 原生/wasm 载荷落位
 node dist/cli/entry.js                               # 启动 TUI
 node dist/cli/entry.js -p "fix the typo"             # 无界面模式

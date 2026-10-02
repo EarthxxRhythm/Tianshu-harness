@@ -873,7 +873,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           lines.push('', 'Recovery:')
           lines.push(`  → 用 read_file / grep 逐一核验：${firewallRefs.join('、')}，然后重跑 deliver_task`)
           lines.push('  → 或从提交信息/清单中移除该引用，或为该行添加 [待核] 标注（诚实降级为线索）。')
-          return { content: lines.join('\n'), isError: true }
+          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
 
         // Mechanical-change classification (computed once, reused for gate bypass
@@ -893,7 +893,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             lines.push('', 'Recovery:')
             lines.push('  → 提供额外的独立证据满足冗余义务（DP 副本验证、独立工具复现、')
             lines.push('    第二条 file:line 证据链），或显式 supersede 该义务后重试。')
-            return { content: lines.join('\n'), isError: true }
+            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           } else if (forceGate && report.supersededFailures > 0) {
             lines.push('', '⚠️  RED overridden (force=true): superseded failures detected (these were later fixed).')
             lines.push('   Verify these pre-existing failures are unrelated to your changes before proceeding.')
@@ -926,7 +926,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
               lines.push('  → Fix the blocking issue above, then re-run deliver_task.')
               lines.push('    If tests keep timing out, run them in smaller batches by directory.')
             }
-            return { content: lines.join('\n'), isError: true }
+            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
         }
         // W1 回归防线: module_unverified 在 assess 层是 YELLOW（可带条件交付），
@@ -947,7 +947,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             }
             lines.push('', '  → Run these tests (run_tests with filter) or a full-scope verification, then re-run deliver_task.')
             lines.push('    If they are unrelated to your change (static-analysis false positive), use force=true.')
-            return { content: lines.join('\n'), isError: true }
+            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
         }
         if (report.state === 'YELLOW') {
@@ -956,7 +956,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         }
         if (!message) {
           lines.push('', '❌ Commit requires a "message" parameter.')
-          return { content: lines.join('\n'), isError: true }
+          return { content: lines.join('\n'), isError: true, errorKind: 'format_error' }
         }
 
         // 宣称-证据对账（复现即证明）：commit message / checklist 里宣称测试绿，
@@ -970,7 +970,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           })
           if (audit.status === 'block') {
             lines.push('', ...audit.lines)
-            return { content: lines.join('\n'), isError: true }
+            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
           if (audit.status === 'warn') {
             lines.push('', ...audit.lines)
@@ -987,7 +987,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           const notAdoptable = adoptFiles.filter(f => !adoptableSet.has(f))
           if (notAdoptable.length > 0) {
             lines.push('', `❌ Adopt: file(s) not in external or co-owned files: ${notAdoptable.join(', ')}. Only external and co-owned files can be adopted.`)
-            return { content: lines.join('\n'), isError: true }
+            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
           const adopted = ctx.ownership.adoptFiles(adoptFiles)
           if (adopted.length > 0) {
@@ -1024,7 +1024,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
               lines.push(`  Detail: ${postAdoptionReport.currentBlockingFailure}`)
             }
             lines.push('  → Run verification for the adopted files, then re-run deliver_task.')
-            return { content: lines.join('\n'), isError: true }
+            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
         }
 
@@ -1039,12 +1039,12 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           const notOwned = requestedFiles.filter(f => !ownedSet.has(f))
           if (notOwned.length > 0) {
             lines.push('', `❌ File(s) not in owned files: ${notOwned.join(', ')}. Cannot commit non-owned files.`)
-            return { content: lines.join('\n'), isError: true }
+            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
           filesToCommit = requestedFiles
         } else if (requestedFiles && Array.isArray(requestedFiles) && requestedFiles.length === 0) {
           lines.push('', '❌ No files specified for commit. Provide non-empty files array or omit to commit all owned files.')
-          return { content: lines.join('\n'), isError: true }
+          return { content: lines.join('\n'), isError: true, errorKind: 'format_error' }
         }
 
         const commitConflictFiles = new Set(filesToCommit)
@@ -1052,7 +1052,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         if (blockingClaimConflicts.length > 0 && !forceGate) {
           lines.push('', '❌ Cannot commit: cross-session claim conflicts are present.')
           lines.push('   → Resolve the other session claim or use force=true only after independently verifying the override is safe.')
-          return { content: lines.join('\n'), isError: true }
+          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
         if (blockingClaimConflicts.length > 0 && forceGate) {
           lines.push('', '⚠️ Cross-session claim conflicts overridden with force=true. Verify the other session has finished or approved the takeover.')
@@ -1122,7 +1122,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         if (cohesion.needsWarning && !cohesionOverride) {
           lines.push('', ...cohesion.warningLines.map(l => `  ${l}`))
           mark('cohesion:denied')
-          return { content: lines.join('\n'), isError: true }
+          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
         if (cohesion.needsWarning && cohesionOverride) {
           lines.push('', '  ⚠️ Cohesion gate overridden with force=true. Verify this is truly one logical unit.')

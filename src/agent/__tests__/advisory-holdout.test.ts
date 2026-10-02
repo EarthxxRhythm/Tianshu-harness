@@ -133,13 +133,14 @@ describe('AdvisoryReadback shadow 桶隔离', () => {
     assert.equal(rb.getDeliveredCount('k'), 1)
   })
 
-  test('shadow 状态翻转作废反事实 trial:真实 pending 存在时新扣留回滚 shadowHeld', () => {
+  test('shadow 状态翻转作废反事实 trial:真实 pending 存在时新扣留记未决，不制造已判定样本', () => {
     const rb = new AdvisoryReadback()
     const expect_ = { kind: 'verify_attempted' as const, withinTurns: 3 }
     rb.track([{ key: 'k', category: 'discipline', expect: expect_ }], 1)
     rb.track([{ key: 'k', category: 'discipline', expect: expect_, shadow: true }], 2)
     const s = rb.getStats().get('k')!
-    assert.equal(s.shadowHeld, 0) // 模型近期已见过提醒,扣留无对照价值
+    assert.equal(s.shadowHeld, 1)
+    assert.equal(s.shadowDecided, 0) // 模型近期已见过提醒,扣留无对照价值
     assert.equal(s.delivered, 1)
   })
 
@@ -151,7 +152,8 @@ describe('AdvisoryReadback shadow 桶隔离', () => {
     rb.observeTool({ turn: 2, name: 'run_tests', target: '', isError: false })
     rb.evaluate(2)
     const s = rb.getStats().get('k')!
-    assert.equal(s.shadowHeld, 0)
+    assert.equal(s.shadowHeld, 1)
+    assert.equal(s.shadowDecided, 0)
     assert.equal(s.adopted, 1)
   })
 })
@@ -159,7 +161,7 @@ describe('AdvisoryReadback shadow 桶隔离', () => {
 describe('跨会话先验三消费方(B)', () => {
   function seeded(): AdvisoryReadback {
     const rb = new AdvisoryReadback()
-    rb.seedPriors([['k', { delivered: 5, adopted: 4, ignored: 1, shadowHeld: 2, shadowSatisfied: 1 }]])
+    rb.seedPriors([['k', { delivered: 5, adopted: 4, ignored: 1, shadowHeld: 2, shadowDecided: 2, profile: 'main', shadowSatisfied: 1 }]])
     return rb
   }
 
@@ -180,7 +182,7 @@ describe('跨会话先验三消费方(B)', () => {
 
   test('副驾闸门:先验决出样本超上限时按比例缩放保采纳率', () => {
     const rb = new AdvisoryReadback()
-    rb.seedPriors([['big', { delivered: 100, adopted: 60, ignored: 40, shadowHeld: 0, shadowSatisfied: 0 }]])
+    rb.seedPriors([['big', { delivered: 100, adopted: 60, ignored: 40, shadowHeld: 0, shadowDecided: 0, profile: 'main', shadowSatisfied: 0 }]])
     const t = rb.getTotalsWithPriors()
     assert.ok(Math.abs(t.adopted + t.ignored - 20) < 1e-9, `决出贡献应为上限 20,实际 ${t.adopted + t.ignored}`)
     assert.ok(Math.abs(t.adopted / (t.adopted + t.ignored) - 0.6) < 1e-9, '采纳率应保持 0.6')
@@ -189,8 +191,8 @@ describe('跨会话先验三消费方(B)', () => {
   test('Top-N 次级排序:同 priority 时历史采纳率高者胜出', () => {
     const rb = new AdvisoryReadback()
     rb.seedPriors([
-      ['good', { delivered: 5, adopted: 5, ignored: 0, shadowHeld: 0, shadowSatisfied: 0 }],
-      ['bad', { delivered: 5, adopted: 0, ignored: 5, shadowHeld: 0, shadowSatisfied: 0 }],
+      ['good', { delivered: 5, adopted: 5, ignored: 0, shadowHeld: 0, shadowDecided: 0, profile: 'main', shadowSatisfied: 0 }],
+      ['bad', { delivered: 5, adopted: 0, ignored: 5, shadowHeld: 0, shadowDecided: 0, profile: 'main', shadowSatisfied: 0 }],
     ])
     const bus = new AdvisoryBus()
     bus.setAdoptionRateProvider(key => rb.getAdoptionRate(key))
@@ -218,7 +220,7 @@ describe('跨会话先验三消费方(B)', () => {
 
   test('习惯化不吃先验:seedPriors 不影响 ignoredStreak', () => {
     const rb = new AdvisoryReadback()
-    rb.seedPriors([['k', { delivered: 10, adopted: 0, ignored: 10, shadowHeld: 0, shadowSatisfied: 0 }]])
+    rb.seedPriors([['k', { delivered: 10, adopted: 0, ignored: 10, shadowHeld: 0, shadowDecided: 0, profile: 'main', shadowSatisfied: 0 }]])
     assert.equal(rb.getIgnoredStreak('k'), 0)
   })
 })

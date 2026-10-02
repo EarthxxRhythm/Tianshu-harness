@@ -5,12 +5,20 @@
  * 下载 ~150MB 不随包分发。此命令让新用户一条命令装好，默认带国内镜像 env，
  * 无需自己记 PLAYWRIGHT_DOWNLOAD_HOST。
  *
+ * 安装执行体（#303）：优先「应用自带 node + 自带 playwright-core 的 CLI」——
+ * 命令是绝对路径，不依赖宿主有没有 npm/npx（Linux 发行版常缺）；且下载的
+ * browser revision 与内嵌 playwright-core 的 browsers.json 严格同版，根除
+ * #102 的装错版本问题。只有 CLI 解析不到（开发环境全局安装等）才退回 npx。
+ *
  * 子命令：
  *   rivet browser status            探测 chromium 是否就绪（不启动浏览器）
- *   rivet browser install           npx playwright install chromium（默认带国内镜像）
+ *   rivet browser install           安装 chromium（默认带国内镜像）
  *   rivet browser install --no-mirror   用官方源（海外网络）
  */
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { probeChromium, formatBrowserMissingBanner } from '../tools/net/browser-readiness.js'
 import { playwrightInstallSpec, resolvePlaywrightCoreVersion } from '../tools/net/playwright-driver.js'
 
@@ -33,21 +41,40 @@ export interface BrowserInstallPlan {
 }
 
 /**
+ * 解析应用自带的 playwright-core CLI（cli.js 绝对路径）。
+ * 从本模块位置向上解析 node_modules——打包运行时 playwright-core 与代码同树
+ * （dist/node_modules 或 rivet-runtime/node_modules），必然命中。注意包 exports
+ * 白名单不含 ./cli.js（实测），所以经 package.json 定位再同目录拼接 + 存在性
+ * 确认；解析不到（全局安装/npm link 等）返回 null，安装计划退回 npx 兜底。
+ */
+export function resolveBundledPlaywrightCli(): string | null {
+  try {
+    const pkgPath = createRequire(import.meta.url).resolve('playwright-core/package.json')
+    const cli = join(dirname(pkgPath), 'cli.js')
+    return existsSync(cli) ? cli : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * 组装 `playwright install chromium` 的执行计划（纯函数，供测试直接断言）。
  * 默认注入 npmmirror 镜像 host；--no-mirror 时不注入（走官方源）。
- * Windows 上 npx 是 .cmd shim，用 shell 执行以正确解析。
+ * bundledCli 命中：用自带 node 跑自带 CLI（绝对路径，不依赖外部 npx）；
+ * 否则退回 `npx playwright@<内嵌版本> install chromium`（版本钉死原因见 #102，
+ * Windows 上 npx 是 .cmd shim，用 shell 执行以正确解析）。
  */
 export function buildInstallPlan(
   args: readonly string[],
   platform: NodeJS.Platform = process.platform,
   playwrightVersion: string | null = resolvePlaywrightCoreVersion() ?? null,
+  bundledCli: string | null = resolveBundledPlaywrightCli(),
 ): BrowserInstallPlan {
   const noMirror = args.includes('--no-mirror')
   const env: Record<string, string> = noMirror ? {} : { PLAYWRIGHT_DOWNLOAD_HOST: PLAYWRIGHT_MIRROR_HOST }
-  // npx playwright@<内嵌版本> install chromium —— playwright-core 不含下载器，但
-  // playwright（meta 包）的 install 子命令会下浏览器到 registry 缓存。版本钉在
-  // 内嵌 playwright-core 上：就绪检测按它的 browsers.json 找 revision，不钉版本
-  // 时 npx 拉最新 playwright、装出别的 revision，装完仍报未安装（#102）。
+  if (bundledCli) {
+    return { command: process.execPath, args: [bundledCli, 'install', 'chromium'], env }
+  }
   return {
     command: platform === 'win32' ? 'npx.cmd' : 'npx',
     args: [playwrightInstallSpec(playwrightVersion), 'install', 'chromium'],
@@ -85,7 +112,10 @@ export async function runBrowserInstall(
       windowsHide: true,
     })
     child.on('error', (err) => {
-      write(`\n安装启动失败：${err.message}\n（确认已安装 Node/npm，且 npx 可用）\n`)
+      const hint = plan.command === process.execPath
+        ? '内置 node 运行时可执行文件异常'
+        : '（确认已安装 Node/npm，且 npx 可用）'
+      write(`\n安装启动失败：${err.message}\n${hint}\n`)
       resolve(1)
     })
     child.on('close', (code) => {

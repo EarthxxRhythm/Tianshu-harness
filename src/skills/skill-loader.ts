@@ -20,6 +20,7 @@ import { homedir } from 'node:os'
 import { join, relative, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeFrontmatterSource } from '../utils/frontmatter.js'
+import { serverLogger } from '../server/logger.js'
 import { isSafeFileName } from '../utils/safe-path.js'
 
 export type SkillSource = 'rivet' | 'global-rivet' | 'project-claude' | 'global-claude' | 'builtin' | 'plugin' | 'global-agents' | 'project-agents'
@@ -899,9 +900,9 @@ export function seedBundledSkills(cwd: string): string[] {
   const seeded = seedBundledSkillsFrom(src, cwd)
   if (!bundledSkillsLogged) {
     bundledSkillsLogged = true
-    // 常规启动零输出（"seeded 0 new" 是纯噪音）：真种入新技能或开 debug 才打。
+    // 真种入新技能或 debug 才打（"seeded 0 new" 是纯噪音）
     if (seeded.length > 0 || process.env['RIVET_DEBUG']) {
-      console.log(`[skills] bundled-skills dir=${src}; seeded ${seeded.length} new into ${join(cwd, '.rivet', 'skills')}`)
+      serverLogger.info(`[skills] bundled-skills dir=${src}; seeded ${seeded.length} new into ${join(cwd, '.rivet', 'skills')}`)
     }
   }
   return seeded
@@ -953,9 +954,8 @@ export function retireMatchingSkillCopies(
       }
       const hash = createHash('sha256').update(content).digest('hex')
       if (hash !== entry.sha256) {
-        // User-modified or a different version — keep it.
         if (process.env['RIVET_DEBUG']) {
-          console.log(`[skills] retired ${entry.name} copy kept (content differs from repo version): ${candidate}`)
+          serverLogger.info(`[skills] retired ${entry.name} copy kept (content differs from repo version): ${candidate}`)
         }
         continue
       }
@@ -969,7 +969,7 @@ export function retireMatchingSkillCopies(
     }
   }
   if (removed.length > 0 && process.env['RIVET_DEBUG']) {
-    console.log(`[skills] retired bundled skills cleaned: ${removed.join(', ')}`)
+    serverLogger.info(`[skills] retired bundled skills cleaned: ${removed.join(', ')}`)
   }
   return removed
 }

@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  CRASH_RECOVERY_SEQ_GAP,
   RuntimeSessionManager,
   type ManagedAgent,
   type PersistedSession,
@@ -497,11 +498,34 @@ test('lazy rehydrate allocates restart markers above the durable event high-wate
   const markers = (mem.events.get('stale-index') ?? []).filter(
     (e) => (e.type === 'status' && e.data.reason === 'sidecar-restart') || e.type === 'resume_offer',
   )
-  assert.deepEqual(markers.map((e) => e.seq), [10, 11])
+  const first = 9 + CRASH_RECOVERY_SEQ_GAP + 1
+  assert.deepEqual(markers.map((e) => e.seq), [first, first + 1])
   assert.deepEqual(mem.loadEventHighWaterCalls, ['stale-index'])
   assert.equal(mem.loadEventsCalls.length, 0)
-  assert.equal(mgr.getSession('stale-index')?.lastSeq, 11)
+  assert.equal(mgr.getSession('stale-index')?.lastSeq, first + 1)
 })
+
+// 死掉的实例已把一段尾巴推给在线客户端、却没来得及落盘；客户端从已见游标续播。
+// 实机验收实测：中断标记与下一条用户消息恰好占了这段号，被客户端当重复丢掉。
+for (const [label, persistence] of [
+  ['lazy', (seed: PersistedSession[]) => new LazyMemoryPersistence(seed)],
+  ['eager', (seed: PersistedSession[]) => new MemoryPersistence(seed)],
+] as const) {
+  test(`${label} rehydrate：游标越过磁盘高水位的客户端仍收得到中断标记与后续事件`, () => {
+    const seed: PersistedSession[] = [{
+      record: {
+        id: 'midrun', status: 'running', createdAt: 1, updatedAt: 5,
+        cwd: '/work', lastSeq: 3, pendingApprovals: 0,
+      },
+      events: [ev(1, 'user', { text: 'go' }), ev(2, 'status', { status: 'running' }), ev(3, 'phase', {})],
+    }]
+    const mgr = new RuntimeSessionManager({ createAgent: () => new NoopAgent(), persistence: persistence(seed) })
+    const cursorFromDeadInstance = 3 + 40
+    const types = mgr.getEvents('midrun', cursorFromDeadInstance)!.events.map((e) => e.type)
+    assert.deepEqual(types, ['status', 'resume_offer'], '中断标记与续跑入口必须排在客户端已见游标之后')
+    assert.ok(mgr.getSession('midrun')!.lastSeq > cursorFromDeadInstance, '后续事件从号段之后续号')
+  })
+}
 
 test('lazy rehydrate closes out approvals the crash left dangling', async () => {
   const seed: PersistedSession[] = [{
@@ -1138,4 +1162,34 @@ test('本进程 running 的会话不做事件层合并（并发写归本进程�
   internal.get('a')!.running = false
   await adoptAndSettle(mgr)
   assert.deepEqual(received.map((e) => e.seq), [2], '空闲后外部进度被追上')
+})
+
+// issue #274 的契约钉：adopt 只登记 record（events 为空是**懒加载约定**，与
+// rehydrate 一致），首次打开会话时由 ensureEvents 按需补读磁盘日志。这条契约
+// 此前没有测试覆盖——它正是「外部进程的会话在桌面端可见但内容为空」的争夺点：
+// 服务端在 since=0 时必须回放完整历史，否则断点在别处。
+test('adopt 进来的会话首次打开（since=0）回放磁盘上的完整历史', async () => {
+  const p = new LazyMemoryPersistence([seeded('a')])
+  const mgr = new RuntimeSessionManager({
+    createAgent: () => new NoopAgent(),
+    persistence: p,
+    externalScanMs: 0,
+  })
+
+  // 外部进程跑完了一轮对话：record 与 events 都落在共享 home 上
+  p.saveRecord({ ...seeded('c').record, lastSeq: 2, updatedAt: 500 })
+  p.appendEvent('c', ev(1, 'status', { status: 'running' }))
+  p.appendEvent('c', ev(2, 'text_delta', { text: 'hi' }))
+
+  adoptNow(mgr)
+  assert.deepEqual(
+    mgr.listAllSessions().map((s) => s.id).sort(), ['a', 'c'],
+    'adopt 只登记元数据即可见',
+  )
+  assert.deepEqual(p.loadEventsCalls, [], 'adopt 不预读事件日志（懒加载约定）')
+
+  const replay = await mgr.getEventsAsync('c', 0)
+  assert.equal(replay?.events.length, 2, '首次打开必须回放完整历史')
+  assert.equal(replay?.lastSeq, 2)
+  assert.deepEqual(p.loadEventsCalls, ['c'], '懒加载在首次打开时触发')
 })

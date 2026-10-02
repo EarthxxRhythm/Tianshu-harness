@@ -1,7 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   detectSensitiveFile,
+  detectSensitiveFileOnDisk,
   detectSensitiveGitAdd,
   AGGREGATE_ADD_MARKER,
 } from '../sensitive-file-detector.js'
@@ -115,6 +119,24 @@ describe('sensitive-file-detector', () => {
       assert.equal(detectSensitiveFile('C:\\Users\\x\\.ssh\\id_rsa').sensitive, true)
     })
 
+    it('detects NTFS alternate-data-stream forms (::$DATA opens the file itself on Win32)', () => {
+      for (const p of ['.env::$DATA', '.ENV::$data', '.env:stream:$DATA', '.env.local::$DATA', 'id_rsa::$DATA',
+        'credentials.json::$DATA', 'C:\\repo\\.env::$DATA', 'sub/../.env::$DATA', 'server.key:x', '.env.::$DATA']) {
+        assert.equal(detectSensitiveFile(p).sensitive, true, p)
+      }
+    })
+
+    it('stream suffix cannot borrow a whitelist extension', () => {
+      assert.equal(detectSensitiveFile('.env:notes.md').sensitive, true)
+      assert.equal(detectSensitiveFile('credentials.json:x.test.ts').sensitive, true)
+    })
+
+    it('drive letters and ordinary colon-free paths are unaffected', () => {
+      assert.equal(detectSensitiveFile('C:\\repo\\src\\index.ts').sensitive, false)
+      assert.equal(detectSensitiveFile('C:/repo/README.md').sensitive, false)
+      assert.equal(detectSensitiveFile('docs/.env.example::$DATA').sensitive, false)
+    })
+
     it('whitelists still apply case-insensitively', () => {
       assert.equal(detectSensitiveFile('Scripts/gen-creds.ts').sensitive, false)
       assert.equal(detectSensitiveFile('docs/.ENV.EXAMPLE').sensitive, false)
@@ -218,6 +240,70 @@ describe('sensitive-file-detector', () => {
       assert.equal(detectSensitiveGitAdd('').length, 0)
       assert.equal(detectSensitiveGitAdd('git add').length, 0)
       assert.equal(detectSensitiveGitAdd('git add   ').length, 0)
+    })
+  })
+
+  describe('stacked .env suffixes and git add bypass forms', () => {
+    it('flags framework-standard stacked .env variants', () => {
+      for (const f of ['.env.production.local', '.env.development.local', '.env.test.local', '.env.test', 'apps/web/.env.staging.local']) {
+        assert.equal(detectSensitiveFile(f).sensitive, true, f)
+      }
+    })
+
+    it('keeps templates and source files unflagged', () => {
+      for (const f of ['.env.example', '.env.sample', 'src/env.test.ts', 'config.env.ts']) {
+        assert.equal(detectSensitiveFile(f).sensitive, false, f)
+      }
+    })
+
+    it('strips quotes around git add arguments', () => {
+      assert.deepEqual(detectSensitiveGitAdd('git add ".env"'), ['.env'])
+      assert.deepEqual(detectSensitiveGitAdd("git add '.env.production.local'"), ['.env.production.local'])
+    })
+
+    it('recognizes git global options before add', () => {
+      assert.deepEqual(detectSensitiveGitAdd('git -C repo add .env'), ['.env'])
+      assert.deepEqual(detectSensitiveGitAdd('git -c core.autocrlf=false add credentials.json'), ['credentials.json'])
+    })
+
+    it('treats non-enumerable pathspecs as aggregate', () => {
+      for (const c of ['git add .\\', 'git add *', 'git add -u', 'git add --update', 'git add :/']) {
+        assert.deepEqual(detectSensitiveGitAdd(c), [AGGREGATE_ADD_MARKER], c)
+      }
+    })
+  })
+  describe('detectSensitiveFileOnDisk — canonical on-disk name', () => {
+    it('passes through lexical hits and non-existent paths', () => {
+      assert.equal(detectSensitiveFileOnDisk('/no/such/dir/.env').sensitive, true)
+      assert.equal(detectSensitiveFileOnDisk('/no/such/dir/notes.txt').sensitive, false)
+    })
+
+    it('catches a harmless-looking symlink to .env and keeps the original path', (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'sens-disk-'))
+      try {
+        writeFileSync(join(dir, '.env'), 'SECRET=1\n')
+        try { symlinkSync(join(dir, '.env'), join(dir, 'notes.txt')) } catch { t.skip('symlink not permitted'); return }
+        const r = detectSensitiveFileOnDisk(join(dir, 'notes.txt'))
+        assert.equal(r.sensitive, true)
+        assert.equal(r.path, join(dir, 'notes.txt'))
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('expands Windows 8.3 short names (ENV~1, CREDEN~1.JSO)', (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'sens-disk-'))
+      try {
+        writeFileSync(join(dir, '.env'), 'SECRET=1\n')
+        writeFileSync(join(dir, 'credentials.json'), '{}')
+        writeFileSync(join(dir, 'readme-long-name.md'), '#')
+        if (!existsSync(join(dir, 'ENV~1'))) { t.skip('volume does not generate 8.3 short names'); return }
+        assert.equal(detectSensitiveFileOnDisk(join(dir, 'ENV~1')).sensitive, true)
+        assert.equal(detectSensitiveFileOnDisk(join(dir, 'CREDEN~1.JSO')).sensitive, true)
+        assert.equal(detectSensitiveFileOnDisk(join(dir, 'README~1.MD')).sensitive, false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
     })
   })
 })

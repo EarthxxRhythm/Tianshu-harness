@@ -299,6 +299,9 @@ describe('isProFeatureEnabled', () => {
   beforeEach(() => {
     restore = withEnvSnapshot()
     clearProEnv() // 无 RIVET_DESKTOP → 走 CLI 入口（读 <RIVET_HOME>/license.json）
+    // 隔离默认路径读取面：开发机真实 ~/.rivet/license.json 可能是有效凭证，泄漏
+    // 进「无凭证」用例会让断言假红（2026-10-01 实踩）。rivetHome() 认这个变量。
+    process.env.RIVET_HOME = mkdtempSync(join(tmpdir(), 'pro-feat-none-'))
     __resetProWarningState()
     __setProGrantPublicKeyForTests(null)
   })

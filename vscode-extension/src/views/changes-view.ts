@@ -11,6 +11,7 @@
 import * as vscode from 'vscode'
 import type { SidecarClient } from '../sidecar/client.js'
 import type { WorkingTreeFile } from '../sidecar/protocol.js'
+import { STATUS_LABEL } from '../scm/change-mapping.js'
 
 export const BASE_SCHEME = 'tianshu-base'
 
@@ -35,14 +36,6 @@ export class BaseContentProvider implements vscode.TextDocumentContentProvider {
       return ''
     }
   }
-}
-
-const STATUS_LABEL: Record<WorkingTreeFile['status'], string> = {
-  modified: 'M',
-  added: 'A',
-  deleted: 'D',
-  renamed: 'R',
-  untracked: 'U',
 }
 
 class ChangeItem extends vscode.TreeItem {
@@ -118,6 +111,8 @@ export function registerChangesView(
   context: vscode.ExtensionContext,
   getClient: () => Promise<SidecarClient>,
   workspaceCwd: string,
+  /** L2-5：刷新命令/回滚完成后，通知其他变更面（SCM 资源）同步刷新。 */
+  onRefresh?: () => void,
 ): ChangesTreeProvider {
   const tree = new ChangesTreeProvider(getClient, workspaceCwd)
   const baseProvider = new BaseContentProvider(getClient)
@@ -126,7 +121,10 @@ export function registerChangesView(
     vscode.window.createTreeView('tianshu.changes', { treeDataProvider: tree }),
     vscode.workspace.registerTextDocumentContentProvider(BASE_SCHEME, baseProvider),
 
-    vscode.commands.registerCommand('tianshu.refreshChanges', () => void tree.refresh()),
+    vscode.commands.registerCommand('tianshu.refreshChanges', () => {
+      void tree.refresh()
+      onRefresh?.()
+    }),
 
     vscode.commands.registerCommand('tianshu.openDiff', async (sessionId: string, file: WorkingTreeFile) => {
       const baseUri = vscode.Uri.from({ scheme: BASE_SCHEME, path: `/${file.path}`, query: `session=${sessionId}` })
@@ -165,6 +163,7 @@ export function registerChangesView(
         void vscode.window.showErrorMessage(`回滚失败: ${(err as Error).message}`)
       }
       void tree.refresh()
+      onRefresh?.()
     }),
   )
   return tree

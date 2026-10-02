@@ -34,6 +34,7 @@
  *   POST   /github/prs/:number/merge                   merge a PR (confirm-gated)
  *   POST   /github/prs/:number/push-fix                push auto-fix diff to PR head (confirm-gated)
  */
+import { normalizeRolloverConfig } from '../agent/goal-tracker.js'
 import { decodeRouteParam, type RouteHandler } from './index.js'
 import { allowedCorsOrigin } from './cors.js'
 import type { SseConnectionRegistry } from './sse-registry.js'
@@ -51,7 +52,9 @@ import { compactReplayRuns, compactReplayRunsWithStats, isReplayCompactionEnable
 import { isSessionWorkspaceMode, type SessionWorkspaceMode } from './workspace.js'
 import { computeUsageCost, findModelPricing } from '../utils/pricing.js'
 import { getRollbackPreview, rollbackToCheckpoint, makeOwnershipGuard } from '../agent/checkpoint.js'
-import { listProjectFiles, rankFiles, listDirEntries } from './file-list.js'
+import { rankFiles, listDirEntries } from './file-list.js'
+import { cachedProjectFiles } from './file-context-routes.js'
+import { validateDocumentsPayload, extractDocumentsToText } from './attachment-validation.js'
 import {
   MAX_DOCUMENTS,
   MAX_DOCUMENT_BYTES,
@@ -60,16 +63,13 @@ import {
 } from './attachment-limits.js'
 import { listPrs, getPrDetail, isGhAvailable, getPrDiff, submitPrReview, listPrChecks, getCheckRunLog, mergePr, type PrReviewInput } from './gh-cli.js'
 import { pushFixToPrBranch } from './pr-fix-push.js'
-import { resolveAppPromptInput } from '../tui/slash-commands.js'
+import { resolveAppPromptInput } from '../tui/prompt-input-resolver.js'
 import { getPaletteCommands } from '../tui/command-palette.js'
 import { RECOMMENDED_MAX_SKILLS } from '../skills/skill-loader.js'
 import { validatePath } from '../tools/path-validate.js'
 import { convertOfficeToPdf, ConverterUnavailableError, OFFICE_CONVERTIBLE_EXTS } from './file-preview.js'
 import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
-import { mkdtempSync, rmSync } from 'node:fs'
 import { extname, relative, join, isAbsolute } from 'node:path'
-import { tmpdir } from 'node:os'
-import { extractDocumentText, EXTRACTION_CAVEAT, isExtractableDocument } from '../tools/doc-extract.js'
 import type { HookEntry, HookEvent, HooksConfig } from '../hooks/user-hooks-runner.js'
 import { loadHooksConfig, VALID_EVENTS } from '../hooks/user-hooks-runner.js'
 import { buildDistillPrompt } from '../prompt/rpa-distill.js'
@@ -140,37 +140,6 @@ function validateImagesPayload(value: unknown): { images?: string[]; error?: str
     }
   }
   return { images: value as string[] }
-}
-
-/** Validate a documents payload: array of { name, dataUrl } for office/pdf files.
- *  Server extracts text via doc-extract (pdftotext/textutil/soffice/exceljs) and
- *  prepends to prompt — same injection pattern as the vision bridge.
- *  Shared by POST /sessions (create-with-documents，欢迎页附件) 与
- *  POST /sessions/:id/prompt。 */
-function validateDocumentsPayload(value: unknown): { documents?: Array<{ name: string; dataUrl: string }>; error?: string } {
-  if (value === undefined) return {}
-  if (!Array.isArray(value) || value.length === 0) {
-    return { error: '"documents" must be a non-empty array' }
-  }
-  if (value.length > MAX_DOCUMENTS) {
-    return { error: `Max ${MAX_DOCUMENTS} documents allowed` }
-  }
-  for (const doc of value) {
-    if (typeof doc !== 'object' || doc === null || typeof (doc as { name?: unknown }).name !== 'string' || typeof (doc as { dataUrl?: unknown }).dataUrl !== 'string') {
-      return { error: 'Each document must be { name: string, dataUrl: string }' }
-    }
-    // 扩展名白名单（与图片路径的 ACCEPTED_IMAGE_DATA_URL 对称）：此前任意扩展名
-    // 都能过校验、落盘并交给抽取器；白名单取 doc-extract 的 EXTRACTABLE——
-    // 「能抽取才放行」，两侧语义单一来源。
-    if (!isExtractableDocument((doc as { name: string }).name)) {
-      return { error: 'Each document must be an extractable type (.pdf/.docx/.xlsx/…)' }
-    }
-    const dataUrl = (doc as { dataUrl: string }).dataUrl
-    if (decodedBase64Bytes(dataUrl) > MAX_DOCUMENT_BYTES) {
-      return { error: `Each document must be <= ${Math.round(MAX_DOCUMENT_BYTES / 1024 / 1024)}MB` }
-    }
-  }
-  return { documents: value as Array<{ name: string; dataUrl: string }> }
 }
 
 /** S — accepted autonomy levels for per-session approval-mode overrides. */
@@ -524,12 +493,13 @@ export function buildSessionRoutes(
     // by the manager. State changes emit `goal_state` events (SSE).
     'POST /sessions/:id/goal': withAuth(async (body, params) => {
       const id = params!.id!
-      const data = (body ?? {}) as { goal?: unknown; maxIterations?: unknown; wallClockMs?: unknown; successCriteria?: unknown; contextWindow?: unknown }
+      const data = (body ?? {}) as { goal?: unknown; maxIterations?: unknown; wallClockMs?: unknown; successCriteria?: unknown; contextWindow?: unknown; rollover?: unknown }
       if (typeof data.goal !== 'string' || data.goal.trim().length === 0) {
         return { status: 400, body: { error: 'Missing or empty "goal"' } }
       }
+      if (!(await manager.ensureSessionAgent(id))) return { status: 404, body: { error: 'Session not found' } }
       const maxIter = typeof data.maxIterations === 'number' && data.maxIterations > 0 ? Math.floor(data.maxIterations) : 100
-      const ctxWindow = typeof data.contextWindow === 'number' && data.contextWindow > 0 ? data.contextWindow : 64000
+      const ctxWindow = typeof data.contextWindow === 'number' && data.contextWindow > 0 ? data.contextWindow : (manager.getSession(id)?.contextWindow ?? 64000)
       const opts = {
         goal: data.goal,
         maxIterations: maxIter,
@@ -537,7 +507,8 @@ export function buildSessionRoutes(
         ...(typeof data.wallClockMs === 'number' && data.wallClockMs > 0 ? { wallClockMs: data.wallClockMs } : {}),
         ...(Array.isArray(data.successCriteria) ? { successCriteria: data.successCriteria.filter((c): c is string => typeof c === 'string') } : {}),
       }
-      const snap = await manager.setGoal(id, opts)
+      const rollover = normalizeRolloverConfig(data.rollover)
+      const snap = await manager.setGoal(id, rollover ? { ...opts, rollover } : opts)
       if (!snap) return { status: 503, body: { error: 'Goal mode unavailable (session not found or sidecar not goal-capable)' } }
       return { status: 200, body: snap }
     }, apiToken),
@@ -559,6 +530,11 @@ export function buildSessionRoutes(
       const snap = manager.resumeGoal(params!.id!)
       if (!snap) return { status: 404, body: { error: 'No paused goal to resume' } }
       return { status: 200, body: snap }
+    }, apiToken),
+
+    'POST /sessions/:id/goal/rollover/resume': withAuth(async (_body, params) => {
+      const ok = await manager.retryGoalRollover(params!.id!)
+      return { status: ok ? 200 : 409, body: { ok, rollover: manager.getSession(params!.id!)?.goalRollover } }
     }, apiToken),
 
     'POST /sessions/:id/goal/cancel': withAuth(async (_body, params) => {
@@ -1491,7 +1467,7 @@ export function buildSessionRoutes(
       if (!rec) return { status: 404, body: { error: 'Session not found' } }
       const q = typeof params?.q === 'string' ? params.q : ''
       const limit = Math.min(Math.max(Number(params?.limit ?? 50) || 50, 1), 200)
-      const all = await listProjectFiles(rec.cwd)
+      const all = await cachedProjectFiles(rec.cwd, params?.refresh === '1')
       return { status: 200, body: { files: rankFiles(all, q, limit) } }
     }, apiToken),
 
@@ -2522,35 +2498,4 @@ export function buildSessionRoutes(
   }
 
   return routes
-}
-
-/** 把文档附件（base64 dataUrl）落盘到临时目录，调 extractDocumentText 抽取文本，
- *  返回拼好的前置块（含 EXTRACTION_CAVEAT）。失败的单个文档降级为错误提示，
- *  不阻断整体发送。 */
-async function extractDocumentsToText(
-  documents: Array<{ name: string; dataUrl: string }>,
-): Promise<string | null> {
-  const parts: string[] = []
-  const tmpBase = mkdtempSync(join(tmpdir(), 'rivet-doc-'))
-  try {
-    for (const doc of documents) {
-      const ext = extname(doc.name).toLowerCase() || '.bin'
-      const tmpPath = join(tmpBase, `${doc.name.replace(/[^A-Za-z0-9._-]/g, '_')}`)
-      try {
-        const base64 = doc.dataUrl.split(',')[1] ?? ''
-        writeFileSync(tmpPath, Buffer.from(base64, 'base64'))
-        const result = await extractDocumentText(tmpPath)
-        if (result.ok) {
-          parts.push(`[document: ${doc.name}]\n${EXTRACTION_CAVEAT}\n\n${result.text}`)
-        } else {
-          parts.push(`[document: ${doc.name}]\n(extraction failed: ${result.suggestion})`)
-        }
-      } catch (err) {
-        parts.push(`[document: ${doc.name}]\n(extraction error: ${(err as Error).message})`)
-      }
-    }
-  } finally {
-    rmSync(tmpBase, { recursive: true, force: true })
-  }
-  return parts.length > 0 ? parts.join('\n\n---\n\n') : null
 }

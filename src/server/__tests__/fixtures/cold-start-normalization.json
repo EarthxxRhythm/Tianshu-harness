@@ -1,0 +1,120 @@
+{
+  "about": "冷启动归一对照夹具。sessions 是磁盘上的会话目录（index 为 index.json 原文，缺席 = 没有该文件；events 为 events.jsonl 各行）。expected 是服务端对这份数据冷启动后的真实结果，由 cold-start-normalization.test.ts 钉住；桌面端（闭源）用同一份数据校验本地快照与占位层的归一。改了冷启动规则让服务端那条红时，按实际输出更新 expected，再跑桌面端那条。",
+  "now": 1790000600000,
+  "sessions": [
+    {
+      "dir": "crash-approval",
+      "index": "{\"id\":\"crash-approval\",\"status\":\"running\",\"createdAt\":1790000000000,\"updatedAt\":1790000005000,\"cwd\":\"/tmp/work\",\"title\":\"跑到一半的会话\",\"lastSeq\":7,\"pendingApprovals\":1,\"model\":\"deepseek:deepseek-v4-pro\",\"domain\":\"tianji\"}",
+      "events": [
+        "{\"seq\":1,\"ts\":1790000000000,\"type\":\"user\",\"data\":{\"text\":\"修一下登录超时\"}}",
+        "{\"seq\":2,\"ts\":1790000000100,\"type\":\"status\",\"data\":{\"status\":\"running\"}}",
+        "{\"seq\":3,\"ts\":1790000001000,\"type\":\"delegation\",\"data\":{\"workerId\":\"w-scan\",\"attemptId\":\"a-scan\",\"status\":\"running\",\"phase\":\"running\",\"objective\":\"查登录日志\"}}",
+        "{\"seq\":4,\"ts\":1790000002000,\"type\":\"delegation\",\"data\":{\"workerId\":\"w-test\",\"attemptId\":\"a-test\",\"status\":\"running\",\"phase\":\"running\",\"objective\":\"跑回归测试\"}}",
+        "{\"seq\":5,\"ts\":1790000003000,\"type\":\"delegation\",\"data\":{\"workerId\":\"w-test\",\"attemptId\":\"a-test\",\"status\":\"completed\",\"phase\":\"completed\",\"objective\":\"跑回归测试\",\"summary\":\"全绿\"}}",
+        "{\"seq\":6,\"ts\":1790000004000,\"type\":\"job\",\"data\":{\"id\":\"j-build\",\"command\":\"npm run build\",\"status\":\"running\",\"startedAt\":1790000004000}}",
+        "{\"seq\":7,\"ts\":1790000005000,\"type\":\"approval_required\",\"data\":{\"requestId\":\"ap-1\",\"toolName\":\"bash\",\"input\":{\"command\":\"rm -rf build\"}}}"
+      ]
+    },
+    {
+      "dir": "idle-legacy-off",
+      "index": "{\"id\":\"idle-legacy-off\",\"status\":\"completed\",\"createdAt\":1780000000000,\"updatedAt\":1780000003000,\"cwd\":\"/tmp/work\",\"title\":\"旧会话\",\"lastSeq\":3,\"pendingApprovals\":0,\"model\":\"deepseek-v4-flash\",\"domain\":\"off\",\"resolvedDomain\":\"tianji\"}",
+      "events": [
+        "{\"seq\":1,\"ts\":1780000000000,\"type\":\"user\",\"data\":{\"text\":\"看看这个目录\"}}",
+        "{\"seq\":2,\"ts\":1780000000100,\"type\":\"status\",\"data\":{\"status\":\"running\"}}",
+        "{\"seq\":3,\"ts\":1780000003000,\"type\":\"done\",\"data\":{\"status\":\"completed\"}}"
+      ]
+    },
+    {
+      "dir": "auto-legacy-resolved",
+      "index": "{\"id\":\"auto-legacy-resolved\",\"status\":\"completed\",\"createdAt\":1780000000000,\"updatedAt\":1780000004000,\"cwd\":\"/tmp/work\",\"lastSeq\":0,\"pendingApprovals\":0,\"model\":\"deepseek:deepseek-v4-flash\",\"domain\":\"auto\",\"resolvedDomain\":\"tianji\"}"
+    },
+    {
+      "dir": "unknown-domain",
+      "index": "{\"id\":\"unknown-domain\",\"status\":\"idle\",\"createdAt\":1780000000000,\"updatedAt\":1780000005000,\"cwd\":\"/tmp/work\",\"lastSeq\":0,\"pendingApprovals\":0,\"domain\":\"retired-star\",\"resolvedDomain\":{\"key\":\"tianji\",\"name\":\"天机\",\"matchedKeywords\":[],\"reason\":\"fallback\"}}"
+    },
+    {
+      "dir": "no-domain",
+      "index": "{\"id\":\"no-domain\",\"status\":\"idle\",\"createdAt\":1780000000000,\"updatedAt\":1780000006000,\"cwd\":\"/tmp/work\",\"lastSeq\":0,\"pendingApprovals\":0}"
+    },
+    {
+      "dir": "archived-one",
+      "index": "{\"id\":\"archived-one\",\"status\":\"completed\",\"createdAt\":1780000000000,\"updatedAt\":1780000007000,\"cwd\":\"/tmp/work\",\"lastSeq\":0,\"pendingApprovals\":0,\"archived\":true}"
+    },
+    {
+      "dir": "no-index",
+      "events": [
+        "{\"seq\":1,\"ts\":1780000000000,\"type\":\"user\",\"data\":{\"text\":\"落盘前崩溃\"}}"
+      ]
+    },
+    {
+      "dir": "bad-id",
+      "index": "{\"title\":\"没有 id\"}"
+    }
+  ],
+  "expected": {
+    "list": [
+      {
+        "id": "auto-legacy-resolved",
+        "status": "completed",
+        "pendingApprovals": 0,
+        "model": "deepseek:deepseek-v4-flash",
+        "domain": "auto",
+        "resolvedDomain": { "key": "tianji", "name": "天机", "matchedKeywords": [], "reason": "fallback" },
+        "domainGlyph": "⚙",
+        "domainAccent": "primary"
+      },
+      {
+        "id": "crash-approval",
+        "status": "aborted",
+        "pendingApprovals": 0,
+        "title": "跑到一半的会话",
+        "model": "deepseek:deepseek-v4-pro",
+        "domain": "tianji",
+        "domainGlyph": "⚝",
+        "domainAccent": "primary"
+      },
+      {
+        "id": "idle-legacy-off",
+        "status": "completed",
+        "pendingApprovals": 0,
+        "title": "旧会话",
+        "model": "deepseek-v4-flash",
+        "domain": "auto",
+        "domainGlyph": "⚙",
+        "domainAccent": "primary"
+      },
+      {
+        "id": "no-domain",
+        "status": "idle",
+        "pendingApprovals": 0,
+        "domain": "auto",
+        "domainGlyph": "⚙",
+        "domainAccent": "primary"
+      },
+      {
+        "id": "no-index",
+        "status": "aborted",
+        "pendingApprovals": 0,
+        "domain": "auto",
+        "domainGlyph": "⚙",
+        "domainAccent": "primary"
+      },
+      {
+        "id": "unknown-domain",
+        "status": "idle",
+        "pendingApprovals": 0,
+        "domain": "auto",
+        "domainGlyph": "⚙",
+        "domainAccent": "primary"
+      }
+    ],
+    "coldStartEvents": {
+      "crash-approval": [
+        { "seq": 100008, "ts": 1790000600000, "type": "approval_resolved", "data": { "requestId": "ap-1", "decision": "sidecar-restart", "toolName": "bash" } },
+        { "seq": 100009, "ts": 1790000600000, "type": "status", "data": { "status": "aborted", "reason": "sidecar-restart", "interruptedApprovals": [{ "requestId": "ap-1", "toolName": "bash" }] } },
+        { "seq": 100010, "ts": 1790000600000, "type": "resume_offer", "data": { "model": "deepseek:deepseek-v4-pro", "domain": "tianji" } },
+        { "seq": 100011, "ts": 1790000600000, "type": "delegation", "data": { "workerId": "w-scan", "attemptId": "a-scan", "status": "failed", "phase": "failed", "elapsedMs": 599000, "failureReason": "caller_aborted" } }
+      ]
+    }
+  }
+}

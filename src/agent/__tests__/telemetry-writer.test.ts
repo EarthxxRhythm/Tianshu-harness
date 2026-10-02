@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createTelemetryWriter, VITALS_LITE_KIND, COGNITIVE_FRAME_LITE_KIND, ADVISORY_OUTCOME_KIND, ADVISORY_HOLDOUT_KIND } from '../telemetry-writer.js'
+import { createTelemetryWriter, VITALS_LITE_KIND, COGNITIVE_FRAME_LITE_KIND, ADVISORY_OUTCOME_KIND, ADVISORY_HOLDOUT_KIND, CVM_VECTOR_DECISION_KIND } from '../telemetry-writer.js'
 import { isTuiPerfEnabled } from '../../tui/engine/perf-monitor.js'
 import type { PerceptionTelemetrySnapshot } from '../perception.js'
 import { buildTelemetrySnapshot } from '../perception.js'
@@ -194,6 +194,24 @@ describe('createTelemetryWriter — lite mode (W5)', () => {
       const raw = readFileSync(join(dir, '.rivet', 'sensorium.jsonl'), 'utf-8')
       const lines = raw.trim().split('\n').map(line => JSON.parse(line) as { kind?: string })
       assert.deepEqual(lines.map(line => line.kind), [ADVISORY_OUTCOME_KIND, ADVISORY_HOLDOUT_KIND])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('T1：cvm-vector-decision 默认落盘（shadow 决策台账唯一数据源）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rivet-telemetry-cvm-'))
+    try {
+      const writer = createTelemetryWriter(dir)
+      // 完整记录形状 = turn-step-producer 的真实写入（含 facts/candidateKey/yielded）
+      writer.write({ kind: CVM_VECTOR_DECISION_KIND, turn: 24, mode: 'shadow', classification: 'verification-debt', ruleId: 'CV1', facts: { filesModified: 1, deliveryStatus: 'unverified', turn: 24 }, candidateKey: null, yielded: null })
+      writer.write({ kind: 'recall-summary', foo: 1 }) // debug-only — 仍被过滤
+      await writer.flush()
+
+      const raw = readFileSync(join(dir, '.rivet', 'sensorium.jsonl'), 'utf-8')
+      const lines = raw.trim().split('\n').map(line => JSON.parse(line) as { kind?: string; classification?: string })
+      assert.deepEqual(lines.map(line => line.kind), [CVM_VECTOR_DECISION_KIND], 'lite 模式下决策台账必须落盘——不然 shadow 评估零数据')
+      assert.equal(lines[0]!.classification, 'verification-debt')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

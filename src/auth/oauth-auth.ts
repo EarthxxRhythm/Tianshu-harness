@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { AuthProvider } from './types.js'
 import { generatePKCE, buildAuthorizeUrl } from './oauth.js'
 import { TokenStore, type TokenData } from './token-store.js'
+import { readCodexCliToken, isCodexCliImportSkipped, clearCodexCliImportSkip } from './codex-cli-auth.js'
 import { shouldRefresh } from './refresh.js'
 import { rivetHome } from '../config/paths.js'
 
@@ -15,6 +16,12 @@ export interface OAuthConfig {
   authDir?: string
   onUserCode?: (url: string) => void
   fetch?: typeof globalThis.fetch
+  /**
+   * 官方 Codex CLI 登录态的导入源。缺省 = ~/.codex/auth.json（或
+   * RIVET_CODEX_CLI_AUTH 覆盖）；`false` 关闭导入（测试与「不想共享官方 CLI
+   * 登录态」的部署用）。
+   */
+  importCliAuth?: string | false
 }
 
 const DEFAULT_REDIRECT_PORT = 1455
@@ -42,6 +49,7 @@ async function readErrorBodyCapped(resp: Response, maxBytes = 64 * 1024): Promis
 
 export class OAuthAuth implements AuthProvider {
   private store: TokenStore
+  private storeDir: string
   private config: Required<Pick<OAuthConfig, 'clientId' | 'tokenEndpoint'>> & OAuthConfig
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private server: ReturnType<typeof createServer> | null = null
@@ -53,22 +61,45 @@ export class OAuthAuth implements AuthProvider {
       authDir: config.authDir ?? DEFAULT_AUTH_DIR,
       authorizeBase: config.authorizeBase ?? 'https://auth.openai.com/oauth/authorize',
     }
+    this.storeDir = authDir ?? config.authDir ?? join(rivetHome(), 'auth')
     this.store = new TokenStore(
       // Fallback lands in the platform data root (%LOCALAPPDATA%\.rivet\auth on
       // Windows, ~/.rivet/auth elsewhere). The old process.env.HOME default was
       // unset on native Windows, so login state was silently lost between runs.
-      authDir ?? config.authDir ?? join(rivetHome(), 'auth'),
+      this.storeDir,
       'codex',
     )
   }
 
+  /**
+   * store 读取的唯一入口：我们自己的 token 优先；为空时尝试从官方 Codex CLI
+   * （~/.codex/auth.json）一次性导入——本机已用官方 CLI 登录过 ChatGPT 的用户
+   * 免走 PKCE。导入成功即落我们的加密 store，之后不再看源文件（一次性语义）。
+   */
+  private loadWithImport(): TokenData | null {
+    const existing = this.store.load()
+    if (existing) return existing
+    if (this.config.importCliAuth === false) return null
+    // 登出抑制：用户在桌面/CLI 登出后，官方 CLI 的登录态不得把账号当场拉回来
+    // （clearOAuthLogin 会立这个标记；重新走 PKCE 登录成功时摘除）。
+    if (isCodexCliImportSkipped(this.storeDir)) return null
+    const imported = readCodexCliToken(
+      typeof this.config.importCliAuth === 'string'
+        ? { RIVET_CODEX_CLI_AUTH: this.config.importCliAuth }
+        : undefined,
+    )
+    if (!imported) return null
+    this.store.save(imported)
+    return imported
+  }
+
   isAuthenticated(): boolean {
-    const token = this.store.load()
+    const token = this.loadWithImport()
     return token !== null && token.expiresAt > Date.now()
   }
 
   async getHeaders(): Promise<Record<string, string>> {
-    let token = this.store.load()
+    let token = this.loadWithImport()
     if (!token) {
       throw new Error(
         'Not authenticated — no stored OAuth token. ' +
@@ -100,6 +131,8 @@ export class OAuthAuth implements AuthProvider {
     const code = await this.startCallbackServer(port, state, authUrl)
     const tokens = await this.exchangeCode(code, pkce.verifier, redirectUri)
     this.store.save(tokens)
+    // 主动重登成功 = 恢复官方 CLI 导入许可（登出时立过抑制标记的话）。
+    clearCodexCliImportSkip(this.storeDir)
     this.startAutoRefresh()
   }
 

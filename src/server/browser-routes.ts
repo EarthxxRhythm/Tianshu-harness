@@ -107,8 +107,10 @@ export function startBrowserInstall(
       running: false,
       finishedAt: Date.now(),
       exitCode: err ? 1 : (code ?? 1),
-      // 启动就失败（没有 npx / PATH 里找不到）和"下载失败"是两码事，前者重试无用。
-      error: err ? `安装启动失败：${err.message}（确认已安装 Node/npm 且 npx 可用）` : undefined,
+      // 启动就失败（运行时缺失/PATH 里找不到）和"下载失败"是两码事，前者重试无用。
+      error: err
+        ? `安装启动失败：${err.message}（${plan.command === process.execPath ? '内置 node 运行时异常' : '确认已安装 Node/npm 且 npx 可用'}）`
+        : undefined,
     }
   })
   return { started: true }

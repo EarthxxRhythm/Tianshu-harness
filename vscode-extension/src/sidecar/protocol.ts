@@ -155,7 +155,15 @@ export interface ProviderListItem {
   baseUrl?: string
   isDefault: boolean
   keyStatus: { source: 'inline' | 'env' | 'none'; ref: string }
-  models: { id: string; alias?: string; supportsVision?: boolean }[]
+  /** models 的 description/contextWindow/maxTokens 为 server contractModels 投影（config-routes）。 */
+  models: {
+    id: string
+    alias?: string
+    description?: string
+    contextWindow?: number
+    maxTokens?: number
+    supportsVision?: boolean
+  }[]
   isPreset: boolean
 }
 

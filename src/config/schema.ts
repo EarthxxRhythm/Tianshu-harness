@@ -684,6 +684,8 @@ export const searchSchema = z.object({
   tavilyApiKeyEnv: z.string().default('TAVILY_API_KEY'),
   /** Env var holding the Bocha (博查) Search API key — 国内直连 AI 搜索（Tavily 国内替代）。 */
   bochaApiKeyEnv: z.string().default('BOCHA_API_KEY'),
+  /** Env var holding the Serply Search API key (Google results, offshore). */
+  serplyApiKeyEnv: z.string().default('SERPLY_API_KEY'),
   /** Inline Bocha Search API key。**运行时物化值**——明文只活在内存：loadConfig
    *  按 bochaKeyRef 从 secrets.json（AES-256-GCM）读回；config.json 只留 keyRef
    *  指针，绝不落明文（issue #220，与 provider.apiKey 同规）。 */
@@ -692,6 +694,8 @@ export const searchSchema = z.object({
   braveApiKey: z.string().optional(),
   /** Inline Tavily Search API key（运行时物化，落盘只留 tavilyKeyRef）。 */
   tavilyApiKey: z.string().optional(),
+  /** Inline Serply Search API key（运行时物化，落盘只留 serplyKeyRef）。 */
+  serplyApiKey: z.string().optional(),
   /** secrets.json 中 Bocha key 的 keyRef 指针（`search:bocha`）。迁移前的老配置若
    *  仍是明文 bochaApiKey，loadConfig 首次读取时迁入 secrets.json 并改写此指针。 */
   bochaKeyRef: z.string().optional(),
@@ -699,6 +703,8 @@ export const searchSchema = z.object({
   braveKeyRef: z.string().optional(),
   /** secrets.json 中 Tavily key 的 keyRef 指针（`search:tavily`）。 */
   tavilyKeyRef: z.string().optional(),
+  /** secrets.json 中 Serply key 的 keyRef 指针（`search:serply`）。 */
+  serplyKeyRef: z.string().optional(),
   /** Per-backend request timeout (ms). */
   timeoutMs: z.number().int().positive().default(15_000),
   /** Optional region/country hint passed to backends that support it (Brave). */
@@ -895,6 +901,13 @@ export const uiSchema = z.object({
   /** GlanceBar density on startup. 'compact' (default) = mode/model/context%/elapsed;
    *  'full' = everything (goal/todo/effort/cache/cost). Runtime `/glance` toggles. */
   glanceDensity: z.enum(['compact', 'full']).optional(),
+  /** CVM 拦截提示的级别开关（issue #247 第 2 条）。off 全关；intercept 只放行
+   *  拦截级；warn 放行拦截 + 警告；all 全放行。缺省 intercept——issue 明说「默认
+   *  关闭会让 CVM 在默认路径下依然不可见」。运行期 `/cvm [off|intercept|warn|all]` 切换。 */
+  cvmNotices: z.enum(['off', 'intercept', 'warn', 'all']).optional(),
+  /** CVM 同类拦截的聚合同窗口（毫秒，issue #247 第 3 条）。缺省 8000（issue 给
+   *  5–10s 区间，具体取值由实现定）。 */
+  cvmNoticeWindowMs: z.number().int().positive().optional(),
   /** 协同建议行（输入时提示 /team /scout /council）。默认开；false 永久关闭。
    *  环境变量 RIVET_ORCHESTRATION_HINT=0 同效且优先。 */
   orchestrationHint: z.boolean().optional(),

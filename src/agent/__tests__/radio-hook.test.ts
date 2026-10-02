@@ -148,15 +148,15 @@ describe('TianshuRadioHook', () => {
     const emitted2 = runHook(
       hook,
       { turn: 2 },
-      { name: 'bash', success: false, target: 'npm test', isError: true },
+      { name: 'bash', success: false, target: 'npm test', input: { command: 'npm test' }, isError: true },
     )
-    assert.equal(emitted2.length, 0, `should not emit on turn 2 due to cooldown, got: ${JSON.stringify(emitted2)}`)
+    assert.ok(!emitted2.some(msg => msg.includes('测试失败')), 'phase transition may emit; failure reminder remains cooled')
 
-    // Turn 3: bash fails, gap=2 >= TEST_FAIL_COOLDOWN=2 → test_fail emits
+    // Turn 4: two turns after the verify phase transition, failure notice is eligible.
     const emitted3 = runHook(
       hook,
-      { turn: 3 },
-      { name: 'bash', success: false, target: 'npm test', isError: true },
+      { turn: 4 },
+      { name: 'bash', success: false, target: 'npm test', input: { command: 'npm test' }, isError: true },
     )
     assert.ok(emitted3.some(msg => msg.includes('测试失败')), `expected test_fail, got: ${JSON.stringify(emitted3)}`)
   })
@@ -183,7 +183,7 @@ describe('TianshuRadioHook', () => {
     const emitted2 = runHook(
       hook,
       { turn: 2 },
-      { name: 'test_runner', success: true, target: 'tests/unit' },
+      { name: 'run_tests', success: true, target: 'tests/unit' },
     )
     assert.ok(emitted2.some(msg => msg.includes('试锋') || msg.includes('测试')), `expected transition, got: ${JSON.stringify(emitted2)}`)
 
@@ -191,7 +191,7 @@ describe('TianshuRadioHook', () => {
     const emitted3 = runHook(
       hook,
       { turn: 3 },
-      { name: 'test_runner', success: true, target: 'tests/unit' },
+      { name: 'run_tests', success: true, target: 'tests/unit' },
     )
     assert.ok(emitted3.some(msg => msg.includes('测试通过')), `expected test_pass, got: ${JSON.stringify(emitted3)}`)
   })

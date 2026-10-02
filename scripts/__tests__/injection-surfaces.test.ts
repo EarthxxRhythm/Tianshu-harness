@@ -57,10 +57,12 @@ describe('注入点申报表 · 基线', () => {
 
   it('规模与通道数符合当前实现', () => {
     const { stats } = runChecks()
-    // 27 个普通 appendix 块 + 2 个受保护块 + 10 个通道级条目
+    // 27 个普通 appendix 块 + 2 个受保护块 + 12 个通道级条目
+    // （12 = 10 + PR #312 收编的 reminder.goal-rollover-kickoff/-inputs；
+    //  该提交同步了申报表但漏更本测试的规模断言，导致 41 vs 39 预存红）
     assert.equal(stats.appendix, 27)
     assert.equal(stats.appendixProtected, 2)
-    assert.equal(stats.surfaces, 39)
+    assert.equal(stats.surfaces, 41)
     assert.equal(stats.channels, 7)
     // CvmInjectionSource 七源全部被认领
     assert.equal(stats.metered, 7)

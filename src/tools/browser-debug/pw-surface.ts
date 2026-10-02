@@ -92,6 +92,8 @@ export interface PwBrowser {
 export interface PwChromium {
   launchPersistentContext(userDataDir: string, opts: Record<string, unknown>): Promise<PwContext>
   connectOverCDP(endpointUrl: string): Promise<PwBrowser>
+  /** registry 托管缓存里的 chromium 可执行文件路径（#302：launch 统一判据解析用；测试桩可省）。 */
+  executablePath?(): string
 }
 
 export async function loadPlaywright(): Promise<{ chromium: PwChromium }> {

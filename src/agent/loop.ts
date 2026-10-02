@@ -1,3 +1,6 @@
+import { observePal } from './pal-observation.js'
+import { palMode } from './hooks/problem-attack-hook.js'
+import { sessionStateAdvice } from './runtime-advice-facts.js'
 import type { ToolHistoryEntry } from '../prompt/volatile.js'
 import { renderPlanExecutingBlock } from '../prompt/volatile.js'
 import type { KnowledgeCandidate } from '../memory/essence-gate.js'
@@ -129,7 +132,8 @@ import { extractPlanConstraints, planRefFor, renderPlanConstraints } from './pla
 import type { ApprovalMode, AgentConfig, AgentCallbacks } from './loop-types.js'
 import type { PermissionAllowRule, PermissionOverlay } from './permissions.js'
 import { createPermissionOverlay } from './permissions.js'
-import { recordToolHistory } from "./tool-history-recorder.js";
+import { recordToolHistory, RECENT_TOOL_HISTORY_CAP } from "./tool-history-recorder.js";
+import { OutputWindowTracker } from './output-window-tracker.js'
 import { requestThetaCheck } from "./theta-controller.js";
 import { createTurnStreamController, createTurnCompletionController, createToolExecutionController, createPlanTraceCoordinator, createCompactBoundaryCoordinator, createTurnOrchestrator, createTurnStepProducer, createReasoningEffortController, createIntentRetrievalRouteController, createAntiAnchoringController, createModelRoutingShadowController, createPrewarmController, createRuntimeHooksPipeline, buildRuntimeSnapshot, createSidePathUsageRecorder, createReclaimDecisionRecorder, resolveHookDisabledEnv } from "./loop-factory.js";
 import type { TurnStepProducer } from './turn-step-producer.js'
@@ -235,7 +239,21 @@ export class AgentLoop {
   /** Obligation final gate 遥测（auto-continue 触发/误触发/诚实受阻计数，postSession 落 meta）。 */
   obligationGateStats = { continued: 0, misfires: 0, honestBlocked: 0, suppressed: 0 }
   compactFailures: CompactCircuitBreakerState = { consecutiveFailures: 0 }
+  todoTaskContext = { key: 0, multiStep: false, startTurn: 0, initialSignature: '[]' }
+  modelObservationTurn = 0
   recentToolHistory: ToolHistoryEntry[] = []
+  /**
+   * S1 效率时间尺度：近期工具窗口内的主轮输出增量观测器。容量与共享历史
+   * 容量一致（按位对齐才能做同窗口做差）；唯一写入点是 recordToolHistory。
+   */
+  readonly outputWindow = new OutputWindowTracker(RECENT_TOOL_HISTORY_CAP)
+  /**
+   * S2 CCR 可达性：队尾连续**只读**工具调用数（独立累计，**不受 5 条共享
+   * 历史容量限制**）。CCR 的 P6 阈值 6/10 此前从 5 条窗口反算，永不可达。
+   * 由 recordToolHistory 维护、经 buildRuntimeSnapshot 送往 CCR；用户边界
+   * （resetReadOnlyStreak）与产出类工具归零。
+   */
+  readOnlyStreak = 0
   /** Component C (typecheck-reminder): a .ts/.tsx file was written this session. */
   touchedTsFiles = false
   /** Component C: a real typecheck (tsc/typecheck) has run since the last TS edit.
@@ -477,13 +495,14 @@ export class AgentLoop {
           ignored: s.ignored - (base?.ignored ?? 0),
           shadowHeld: s.shadowHeld - (base?.shadowHeld ?? 0),
           shadowSatisfied: s.shadowSatisfied - (base?.shadowSatisfied ?? 0),
+          shadowDecided: (s.shadowDecided ?? 0) - (base?.shadowDecided ?? 0),
         }
-        if (delta.delivered > 0 || delta.adopted > 0 || delta.ignored > 0 || delta.shadowHeld > 0 || delta.shadowSatisfied > 0) {
+        if (delta.delivered > 0 || delta.adopted > 0 || delta.ignored > 0 || delta.shadowHeld > 0 || delta.shadowSatisfied > 0 || (delta.shadowDecided ?? 0) > 0) {
           deltas.set(key, delta)
         }
         this.lastEfficacyFlush.set(key, {
           delivered: s.delivered, adopted: s.adopted, ignored: s.ignored,
-          shadowHeld: s.shadowHeld, shadowSatisfied: s.shadowSatisfied,
+          shadowHeld: s.shadowHeld, shadowSatisfied: s.shadowSatisfied, shadowDecided: s.shadowDecided,
         })
       }
       if (deltas.size > 0) this.advisoryEfficacyStore.mergeAndSave(deltas)
@@ -802,22 +821,24 @@ export class AgentLoop {
     })
     // B 跨会话效能信息素：加载 EWMA 衰减后的先验（holdout 资格/副驾闸门/
     // Top-N 次级排序三个消费方;习惯化保持会话内,guardian meta 保持会话纯度）
-    this.advisoryEfficacyStore = new AdvisoryEfficacyStore(this.cwd)
+    const advisoryProfile = this.config.sessionId?.startsWith('worker-') ? 'worker' : 'main'
+    this.advisoryReadback.configure(advisoryProfile)
+    this.advisoryEfficacyStore = new AdvisoryEfficacyStore(this.cwd, advisoryProfile)
     try {
       const priors = this.advisoryEfficacyStore.load()
       this.advisoryReadback.seedPriors(
         [...priors].map(([k, p]) => [k, {
           delivered: p.delivered, adopted: p.adopted, ignored: p.ignored,
-          shadowHeld: p.shadowHeld, shadowSatisfied: p.shadowSatisfied,
+          shadowHeld: p.shadowHeld, shadowSatisfied: p.shadowSatisfied, shadowDecided: p.shadowDecided, profile: advisoryProfile,
         }] as [string, EfficacyPriorCounts]),
       )
     } catch { /* 先验加载失败不致命——回退冷启动 */ }
     this.advisoryBus.setAdoptionRateProvider(key => this.advisoryReadback.getAdoptionRate(key))
     // W2 efficacy 负反馈环（20b9714e）：发射前回读会话内 delivered/adopted——
-    // 同 key 零采纳连发 3 次后冷却翻倍、6 次后会话内静默（constitutional 豁免）。
+    // 同 key 零采纳判定 3 次后降频、6 次后有界静音（constitutional 豁免）。
     this.advisoryBus.setEfficacyStatsProvider(key => {
       const s = this.advisoryReadback.getStats().get(key)
-      return s ? { delivered: s.delivered, adopted: s.adopted } : null
+      return s ? { delivered: s.delivered, adopted: s.adopted, decided: s.adopted + s.ignored, pending: this.advisoryReadback.hasPending(key) } : null
     })
     // 星域措辞适配（2026-07-07）：按当前域把 advisory 翻译成该域听得进的
     // 形态（如天权的证据式裁决协议）。惰性读 sessionDomain——域激活/切换自动生效。
@@ -1096,6 +1117,14 @@ export class AgentLoop {
       const listener = attachSessionPersistListener({ session: this.session, persist: this.persist })
       this._persistDrain = listener.drain
       this._persistCommitCompaction = listener.commitCompaction
+
+      // S3 压缩事件持久化：把内存压缩台账接到 meta 的唯一落盘口。绑在这里
+      // （而非各调用点）是刻意的——自动压缩 / 手动 /compact / rewind / TUI /
+      // headless / server / worker 都经 SessionContext.recordCompactEvent，
+      // 一处绑定即全覆盖；调用点各自落盘必然漏一条路径（本缺陷的历史形态：
+      // meta.compactEvents 初始化后从不写入）。
+      const persist = this.persist
+      this.session.setCompactEventSink(event => { persist.appendCompactEvent(event) })
     }
     // Zen Mode：会话启动 arm（首轮请求前收窄工具面到读面；resume 按 meta 恢复相位）。
     // 必须晚于 persist 初始化——arm 的 resume 判定要读 meta。
@@ -1203,6 +1232,15 @@ export class AgentLoop {
   /** U6: build a StepResult from the tool events recorded for a given turn. */
   private buildStepResultFromTurn(turn: number): StepResult | null {
     return this.planTraceCoordinator.buildStepResultFromTurn(turn)
+  }
+
+  /**
+   * S2 CCR 可达性：用户边界（新任务/用户干预）重置连续只读流水。
+   * 由 turn-step-producer 的 user 消息入口调用——上一段排查的只读流水不是
+   * 新任务的证据（CCR P6 的"排查已连续 N 次只读"不能跨用户回合累计）。
+   */
+  resetReadOnlyStreak(): void {
+    this.readOnlyStreak = 0
   }
 
   recordToolHistory(name: string, input: Record<string, unknown>, isError: boolean, result: string, errorClass?: ToolErrorClass, errorKind?: FailureClass): void {
@@ -2821,7 +2859,7 @@ export class AgentLoop {
         sampleCount: beacon?.sampleCount ?? 0,
         requiredSamples: FLOW_MIN_SAMPLES,
       },
-      pal: this.problemAttack.snapshotForCvm(),
+      ...observePal(palMode(), this.getActiveToolNames().includes('attack_case'), () => this.problemAttack.snapshotForCvm()),
       evidence: {
         hasVerificationDebt,
         deliveryStatus: this.evidence.getState().deliveryStatus,
@@ -2937,6 +2975,7 @@ export class AgentLoop {
     const convergenceCheck = evaluateConvergence({
       turn,
       phaseClass: phaseClass as PhaseClass,
+      runtimeAdvice: sessionStateAdvice({ getActiveToolNames: () => this.getActiveToolNames(), getContextBudget: () => this.getContextBudget(), getModel: () => this.config.promptEngine.getModel() }),
       phaseRelativeTurn,
       scoreHistory: this.convergenceScoreHistory,
       contextWindow: this.config.contextWindow,
@@ -2946,7 +2985,12 @@ export class AgentLoop {
       noToolTurnCount: this.consecutiveNoToolTurns,
       textFingerprints: this.recentTextFingerprints,
       providerName: this.config.providerName,
-      outputTokens: this.session.getTotalUsage().output_tokens,
+      // S1 效率时间尺度：outputTokens 是**窗口增量**（当前主轮累计 − 窗口最旧
+      // 工具调用时的主轮累计），不是会话累计——分母工具数与它同时间尺度。
+      // 口径只含主轮输出（排除侧路成本），无窗口样本时 undefined → detector
+      // 回落分类启发式（缺数据不冒充证据）。旧接线传 getTotalUsage().output_tokens
+      // 使长会话效率恒 0，是伪停滞信号的主源。
+      outputTokens: this.outputWindow.windowDelta(this.session.getMainPathOutputTokens()),
       repeatCount: this.convergenceEmitRepeatCount,
       priorWarningAtL2Plus: warnedInEarlierTurn,
       progressBeacons: {

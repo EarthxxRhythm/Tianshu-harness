@@ -1,3 +1,4 @@
+import { verificationAttempted } from './verification-activity.js'
 import type { AgentLoop } from './loop.js'
 import type { HealthSignal } from './trajectory-health.js'
 import type { ToolErrorClass } from '../tools/types.js'
@@ -7,6 +8,13 @@ import { TYPECHECK_CMD_RE } from './typecheck-gate.js'
 import { classifyBashCommandActivity, toolTargetFromInput } from './tool-target.js'
 import { isUiFilePath, isVisualVerifyTool } from './hooks/render-verify-hook.js'
 import { POINTER_GUARD_ERROR_MARKER } from '../tools/pointer-guard.js'
+import { isReadOnlyToolCall } from './convergence-detector.js'
+
+/**
+ * 共享工具历史容量。S1 的窗口输出观测器（OutputWindowTracker）必须用同一容量
+ * 构造——两者按位对齐才能做同窗口做差；改这个数字要同时看 loop.ts 的观测器装配。
+ */
+export const RECENT_TOOL_HISTORY_CAP = 5
 
 /**
  * 预期失败的双豁免判据（抽成纯函数以便测试，也避免 recordToolHistory 里
@@ -62,6 +70,8 @@ export function recordToolHistory(
     const isTransientGuard = isError && isConvergenceTransient(errorKind, result)
     self.recentToolHistory.push({
       tool: name,
+      verificationAttempted: verificationAttempted(name, input),
+      modelTurn: self.modelObservationTurn,
       target,
       status: isError ? 'failed' : 'success',
       ...(bashActivity ? { bashActivity } : {}),
@@ -75,7 +85,18 @@ export function recordToolHistory(
       ...(isError && errorClass ? { errorClass } : {}),
       ...(isTransientGuard ? { transient: true } : {}),
     })
-    if (self.recentToolHistory.length > 5) self.recentToolHistory.shift()
+    if (self.recentToolHistory.length > RECENT_TOOL_HISTORY_CAP) self.recentToolHistory.shift()
+
+    // ── S1 效率时间尺度 + S2 CCR 可达性：两个**独立于共享窗口**的信号 ──
+    // 都在这个唯一记录点维护，与 recentToolHistory 同触发时序：
+    // - outputWindow：窗口内的主轮输出增量（分母 = 窗口条数，同时间尺度）；
+    // - readOnlyStreak：连续只读累计计数——**刻意不受 RECENT_TOOL_HISTORY_CAP
+    //   限制**。CCR 的 P6 阈值是 6（build）/10（diagnostic），从 5 条窗口反算
+    //   的 streak 上限为 5，规则在生产容量下永不可达（S2 缺陷本体）。
+    //   判据复用 convergence-detector 的 isReadOnlyToolCall（单一事实源，
+    //   与 classifyActivityMode 同源），不在此处再写一份分类。
+    self.outputWindow.record(self.session.getMainPathOutputTokens())
+    self.readOnlyStreak = isReadOnlyToolCall(name, bashActivity) ? self.readOnlyStreak + 1 : 0
 
     // P3-E/H: invalidate plan cache + JIT on file mutations (sync — needed before next API call)
     if (!isError && (name === 'edit_file' || name === 'write_file')) {

@@ -1,3 +1,4 @@
+import { sessionStateAdvice } from './runtime-advice-facts.js'
 import { formatBodyGuardNotice, type BodyGuardNotice } from '../api/request-body-guard.js'
 import type { AgentCallbacks } from './loop-types.js'
 import type { TurnHeartbeat } from './turn-heartbeat.js'
@@ -151,6 +152,7 @@ export interface TurnStateBag {
 // ── Deps interface ──
 
 export interface TurnOrchestratorDeps {
+  getRuntimeAdvice?: () => string
   // === Lifecycle ===
   initializeRun: (userInput: string, callbacks: AgentCallbacks, images?: string[]) => Promise<{
     heartbeat: TurnHeartbeat
@@ -279,8 +281,10 @@ export interface TurnOrchestratorDeps {
   getContextWindow?: () => number
   // === B2 收敛轨迹门（会话 506a5e86 优化：轮数高但轨迹收敛时不催）===
   /** 最近收敛 score 轨迹（loop.convergenceScoreHistory，最新在后）。
-   *  B2 据此判断轮数高是任务性质还是发散——轨迹收敛（最近均值 >= 0.4）
-   *  时静默且不消耗本 run 配额（后续转坏仍可触发）。缺省 = 无轨迹 → 照发（旧行为）。 */
+   *  B2 据此判断轮数高是任务性质还是发散——轨迹收敛（最近均值 >= 0.6，
+   *  对齐 detector L1 线，见 window-thresholds.isB2ConvergingRecently 的
+   *  bar 标定说明）时静默且不消耗本 run 配额（后续转坏仍可触发）。
+   *  缺省 = 无轨迹 → 照发（旧行为）。 */
   getConvergenceScoreHistory?: () => readonly number[]
 
   // === Abort signal ===
@@ -327,22 +331,24 @@ export function wrapCallbacksWithHeartbeat(
   hb: TurnHeartbeat,
   getSessionId?: () => string | undefined,
 ): AgentCallbacks {
+  // #334：静默恢复补报——心跳上报过静默后，首个可见事件补发 working 相位（防客户端静默显示粘滞到下次相位切换）。
+  const resumeIfSilent = (): void => { if (hb.hasFiredSinceTick()) cb.onPhaseChange?.('working', { reason: 'resumed — activity detected' }) }
   return {
     ...cb,
-    onTextDelta: (text) => { hb.tick('streaming text'); cb.onTextDelta(text) },
-    onThinkingDelta: (thinking) => { hb.tick('thinking'); cb.onThinkingDelta(thinking) },
-    onToolUse: (id, name, input) => { hb.tick(`calling ${name}`); cb.onToolUse(id, name, input) },
+    onTextDelta: (text) => { resumeIfSilent(); hb.tick('streaming text'); cb.onTextDelta(text) },
+    onThinkingDelta: (thinking) => { resumeIfSilent(); hb.tick('thinking'); cb.onThinkingDelta(thinking) },
+    onToolUse: (id, name, input) => { resumeIfSilent(); hb.tick(`calling ${name}`); cb.onToolUse(id, name, input) },
     onToolResult: (id, name, result, isError, rawPath, uiContent) => {
-      hb.tick(`${name} returned`)
+      resumeIfSilent(); hb.tick(`${name} returned`)
       cb.onToolResult(id, name, result, isError, rawPath, uiContent)
     },
     onTurnComplete: (usage, turnNumber, isFinal, evidenceSummary, continuationReason) => {
-      hb.tick(`turn ${turnNumber} complete`)
+      resumeIfSilent(); hb.tick(`turn ${turnNumber} complete`)
       cb.onTurnComplete(usage, turnNumber, isFinal, evidenceSummary, continuationReason)
     },
     onPhaseChange: (phase, detail) => {
       // Heartbeat-emitted phases must NOT recursively reset the clock.
-      if (phase !== 'heartbeat') hb.tick(`phase: ${phase}`)
+      if (phase !== 'heartbeat') { resumeIfSilent(); hb.tick(`phase: ${phase}`) }
       cb.onPhaseChange?.(phase, detail)
     },
   }
@@ -1083,15 +1089,11 @@ export class TurnOrchestrator {
           }
           this.deps.flushMeridianTurn()
 
-          // endTurn signal: a tool (e.g. ask_user_question) requested turn termination.
-          // Complete as final and break instead of continuing the tool loop.
-          if (r.endTurn) {
-            this.emitStop({ source: 'end-turn', turn, voluntary: true }, callbacks)
-            await rejectOnAbort(
-              this.deps.completeTurn({ turn, isFinal: true, callbacks }),
-              signal!,
-              'post-turn-endTurn',
-            )
+          // User-facing endTurn requests take priority over automatic rollover.
+          const rollover = !r.endTurn && this.deps.goalContinuation.requestRolloverIfDue(this.deps.getEstimatedTokens())
+          if (r.endTurn || rollover) {
+            this.emitStop({ source: rollover ? 'goal-rollover' : 'end-turn', turn, voluntary: !rollover }, callbacks)
+            await rejectOnAbort(this.deps.completeTurn({ turn, isFinal: true, callbacks }), signal!, 'post-turn-endTurn')
             finalTurnCompleted = true
             break
           }
@@ -1225,7 +1227,7 @@ export class TurnOrchestrator {
               const exploringDomain = starDomain !== null && ['tianji', 'tianxuan', 'pojun'].includes(starDomain)
               const effectiveDiagnostic = diagnostic || exploringDomain
               const content = effectiveDiagnostic
-                ? `本轮已进行 ${b2TurnLimit}+ 次 API 调用。先用工具核实你将要写进结论的关键断言（ls/grep/read 实际文件），核实完再收束；没有工具证据的推断必须标注"未核实"。会话自身状态可用 session_vitals 取证。`
+                ? `本轮已进行 ${b2TurnLimit}+ 次 API 调用。先用工具核实你将要写进结论的关键断言（ls/grep/read 实际文件），核实完再收束；没有工具证据的推断必须标注"未核实"。${this.deps.getRuntimeAdvice?.() ?? sessionStateAdvice()}`
                 : `本轮已进行 ${b2TurnLimit}+ 次 API 调用，请收敛当前动作并输出结论，不要继续发散。`
               if (this.deps.submitAdvisory) {
                 this.deps.submitAdvisory({

@@ -436,6 +436,18 @@ export const APPENDIX_SURFACES: readonly InjectionSurface[] = [
  */
 export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
   {
+    id: 'reminder.goal-rollover-kickoff', channel: 'reminder', cost: 'boundary-rebuild', volatility: 'transition',
+    producer: 'buildRolloverKickoff()',
+    anchor: { file: 'src/server/goal-rollover.ts', symbol: 'export function buildRolloverKickoff' },
+    note: '可选 Goal 接力的新会话首条 user 输入：原目标 + 会话专属交接文档。新历史前缀重建，源会话及冻结 system/trailer 不改写。',
+  },
+  {
+    id: 'reminder.goal-rollover-inputs', channel: 'reminder', cost: 'append-tail', volatility: 'transition',
+    producer: 'prepareRolloverInputs()',
+    anchor: { file: 'src/server/goal-rollover-binding.ts', symbol: '原始输入文件：' },
+    note: '原始附件快照复制到后继会话，抽取文本追加进首条 user 输入；输入大小受窗口预算限制，不能静默丢失文件。',
+  },
+  {
     id: 'system.static',
     channel: 'system-static',
     cost: 'prefix-replace',

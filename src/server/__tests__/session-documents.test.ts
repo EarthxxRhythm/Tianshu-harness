@@ -62,6 +62,33 @@ async function makeXlsxDataUrl(marker: string): Promise<string> {
 
 const PDF_DOC = { name: 'spec.pdf', dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK' }
 
+test('plain text attachments reach the real create/prompt consumer and echo cards', async () => {
+  const { agents, router, manager } = setup()
+  const content = '中文需求\n#!/bin/sh\necho hello'
+  const documents = [{ name: '需求.md', dataUrl: `data:text/plain;base64,${Buffer.from(content).toString('base64')}` }]
+  const created = await router('POST', '/sessions', { prompt: '分析附件', documents }, AUTH)
+  assert.equal(created.status, 201)
+  assert.ok(agents[0]!.runPrompts[0]!.includes(content))
+  const rec = created.body as { id: string }
+  const user = manager.getEvents(rec.id)!.events.find(event => event.type === 'user')!
+  assert.equal(user!.data.promptText, '分析附件')
+  assert.equal((user!.data.documents as Array<{ name: string }>)[0]?.name, '需求.md')
+  const separate = manager.createSession({ cwd: '/tmp/work' })
+  const sent = await router('POST', `/sessions/${separate.id}/prompt`, { prompt: '读脚本', documents: [{ ...documents[0]!, name: 'deploy.sh' }] }, AUTH)
+  assert.equal(sent.status, 200)
+  assert.ok(agents[1]!.runPrompts[0]!.includes(content))
+})
+
+test('plain text attachment validation rejects binary bytes, bad encoding and oversized input', async () => {
+  const { router } = setup()
+  for (const bytes of [Buffer.from([0, 1, 2]), Buffer.from([0xff, 0xaa]), Buffer.alloc(512 * 1024 + 1, 65)]) {
+    const res = await router('POST', '/sessions', { prompt: 'read', documents: [{ name: 'script.sh', dataUrl: `data:text/plain;base64,${bytes.toString('base64')}` }] }, AUTH)
+    assert.equal(res.status, 400)
+  }
+  const res = await router('POST', '/sessions', { prompt: 'read', documents: [{ name: 'fake.exe', dataUrl: 'data:text/plain;base64,aGk=' }] }, AUTH)
+  assert.equal(res.status, 400)
+})
+
 test('POST /sessions documents 校验：空数组 / 超上限 / 形态错误 / 超尺寸 → 400', async () => {
   const { router } = setup()
   const create = (documents: unknown) => router('POST', '/sessions', { prompt: 'x', documents }, AUTH)

@@ -1,3 +1,4 @@
+import { sessionStateAdvice } from './runtime-advice-facts.js'
 /**
  * Multi-Signal Convergence Detector
  *
@@ -13,7 +14,8 @@ import type { EvidenceState } from './evidence.js'
 
 // ─── Types ──────────────────────────────────────────────────────────
 
-export type PhaseClass = 'explore' | 'plan' | 'execute' | 'verify' | 'deliver'
+import type { PhaseClass } from './phase-class.js'
+export type { PhaseClass } from './phase-class.js'
 
 export interface ConvergenceInput {
   /** Current turn number (0-based from AgentLoop) */
@@ -40,9 +42,16 @@ export interface ConvergenceInput {
   /** Provider name for provider-specific thresholds (e.g. 'glm' gets tighter cutoffs).
    *  When absent, uses default DeepSeek-tuned values. */
   providerName?: string
-  /** Total LLM output tokens consumed so far in this session.
-   *  Used by tokenEfficiency signal to measure real output cost vs tool calls.
-   *  When absent, falls back to the old tool-classification heuristic. */
+  /** **近期工具观测窗口内的主轮输出增量**（不是会话累计）。
+   *
+   *  S1 效率时间尺度（2026-10-02 修复）：分子是窗口增量、分母是窗口工具数，
+   *  两者必须同时间尺度。旧实现传 `session.getTotalUsage().output_tokens`
+   *  （会话累计），长会话里 tokensPerTool = 累计/5 迅速爆炸 → exp(-huge) ≈ 0
+   *  → tokenEfficiency 恒 0 的伪停滞信号。累计成本对"这五个工具花了多少输出"
+   *  是不可见的（历史已发生），必须由调用方按窗口做差。
+   *  口径：只含主轮输出（不含 spec 预测/压缩总结等侧路成本），见
+   *  `SessionContext.getMainPathOutputTokens`。
+   *  When absent (无窗口样本), falls back to the old tool-classification heuristic. */
   outputTokens?: number
   /** Number of times the SAME message variant has been previously emitted
    *  (before the current evaluation). Used by buildInjectedMessage to add a
@@ -78,6 +87,7 @@ export interface ConvergenceInput {
   /** W3：会话活动模式（classifyActivityMode 的结果，由调用方传入）。
    *  diagnostic 时收敛文案分流为"先核实断言再收束"。 */
   activityMode?: ActivityMode
+  runtimeAdvice?: string
   /** Turns since current phaseClass was set. 1 = first turn in this phase.
    *  Used to suppress productive-stagnation during the cooling period after
    *  a phase transition. When absent, defaults to Infinity (no cooldown —
@@ -205,10 +215,7 @@ export function classifyActivityMode(
   const windowSlice = recentToolHistory.slice(-window)
   if (windowSlice.length > 0 && windowSlice.some(h => editTools.has(h.tool))) return 'build'
   if (windowSlice.length < 4) return 'build'
-  const readOnly = windowSlice.filter(h =>
-    !PRODUCTIVE_TOOLS.has(h.tool)
-    || (h.tool === 'bash' && h.bashActivity === 'readonly'),
-  ).length
+  const readOnly = windowSlice.filter(h => isReadOnlyToolCall(h.tool, h.bashActivity)).length
   return readOnly / windowSlice.length >= DIAGNOSTIC_READONLY_RATIO ? 'diagnostic' : 'build'
 }
 
@@ -421,9 +428,10 @@ function computeErrorPenalty(
 
 /**
  * tokenEfficiency: real output-token efficiency via exponential decay.
- * When outputTokens is available, uses exp(-tokensPerTool / 500) — direct
- * measurement of LLM output cost vs tool call count. Falls back to the old
- * tool-classification heuristic when outputTokens is absent.
+ * When the caller supplies a **window-relative** output delta (S1), uses
+ * exp(-tokensPerTool / 500) — direct measurement of LLM output cost vs the
+ * tool calls it bought. Falls back to the old tool-classification heuristic
+ * when the delta is absent (no window samples).
  *
  * Returns 1.0 when efficient, approaches 0.0 when token-heavy without progress.
  */
@@ -433,8 +441,11 @@ function computeTokenEfficiency(
   _evidence: ConvergenceInput['evidenceState'],
   outputTokens?: number,
 ): number {
-  const toolCount = history.length
-  // New path: real output tokens → exponential decay
+  // Denominator = the same window the delta was measured over (signalWindow
+  // bounded by the caller's history capacity), so numerator and denominator
+  // share one time scale.
+  const toolCount = Math.min(history.length, windowSize)
+  // New path: window-relative output delta → exponential decay
   if (outputTokens !== undefined && toolCount > 0) {
     const tokensPerTool = outputTokens / toolCount
     if (tokensPerTool <= 0) return 1.0
@@ -590,9 +601,8 @@ function computeTextRepetitionPenalty(fingerprints: ReadonlyArray<string>): numb
 function textRepetitionHasData(fingerprints: ReadonlyArray<string>): boolean {
   const window = fingerprints.slice(-5)
   if (window.length < 3) return false
-  const longWordSets = window.filter(fp => fp.length >= 50)
-    .map(fp => new Set(fp.split(/\s+/).filter(w => w.length >= 3)))
-  return longWordSets.length >= 3
+  // 数据前提=「足够长的指纹个数」（与 compute 的 guard 一致）；集合内容不参与判定。
+  return window.filter(fp => fp.length >= 50).length >= 3
 }
 
 /** Minimum recent text length that counts as a substantial analysis/report. */
@@ -612,6 +622,25 @@ export const PRODUCTIVE_TOOLS = new Set([
   'run_tests', 'bash', 'deliver_task', 'delegate_task', 'delegate_batch',
   'plan_submit', 'plan_close',
 ])
+
+/**
+ * 单次工具调用是否只读（与 classifyActivityMode 的只读判据同源）。
+ *
+ * S2 CCR 可达性：连续只读计数此前由 CCR 从**容量 5 条**的共享历史反算，
+ * 而 P6 阈值是 6（build）/ 10（diagnostic）——streak 上限 5，规则在生产容量下
+ * 永不可达。判据必须抽成单一实现，供「独立累计计数器」复用，否则两处各写一遍
+ * 迟早漂移（本仓库已有一次 A2 漂移事故）。
+ *
+ * bash 的只读性只能由 bashActivity（基于**完整 command** 的分类）判定；缺失
+ * 标签的旧条目 fail-closed 为产出（与 classifyActivityMode 一致）。
+ */
+export function isReadOnlyToolCall(
+  tool: string,
+  bashActivity?: 'readonly' | 'productive',
+): boolean {
+  if (tool === 'bash') return bashActivity === 'readonly'
+  return !PRODUCTIVE_TOOLS.has(tool)
+}
 
 /**
  * Distance since the last productive tool call, measured backwards from the
@@ -857,6 +886,7 @@ function buildInjectedMessage(
   productiveStagnation?: boolean,
   repeatCount?: number,
   activityMode?: ActivityMode,
+  runtimeAdvice?: string,
 ): string {
   const lines: string[] = []
 
@@ -971,7 +1001,7 @@ function buildInjectedMessage(
     lines.push('')
     lines.push('- 把准备写进结论的关键断言用工具核实（ls/grep/read 实际文件），核实完再收束')
     lines.push('- 没有工具证据支撑的推断必须标注"未核实"，不要写成事实')
-    lines.push('- 会话自身状态（上下文占用/缓存命中/信号台账）可用 session_vitals 工具取证，不要凭感觉描述')
+    lines.push(runtimeAdvice ?? sessionStateAdvice())
     return lines.join('\n')
   }
 
@@ -1274,7 +1304,7 @@ export function evaluateConvergence(input: ConvergenceInput): ConvergenceResult 
   const shouldForceSplit = level >= 3 && !noToolForceAbort
   const shouldKick = level >= 2
   const injectedMessage = (level >= 2)
-    ? buildInjectedMessage(level as 2 | 3, score, signals, input.phaseClass, tier, input.evidenceState.deliveryStatus, noToolCount, productiveStagnation, input.repeatCount, input.activityMode)
+    ? buildInjectedMessage(level as 2 | 3, score, signals, input.phaseClass, tier, input.evidenceState.deliveryStatus, noToolCount, productiveStagnation, input.repeatCount, input.activityMode, input.runtimeAdvice)
     : null
 
   return {

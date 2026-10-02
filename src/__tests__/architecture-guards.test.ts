@@ -235,8 +235,11 @@ describe('architecture guards', () => {
   test('no direct process.stdout.write outside LiveEngine', () => {
     // 白名单：/tui/engine/ 是渲染回路的唯一合法直写层；cli/、headless.ts、worker-process/child.ts（NDJSON 协议通道，非渲染）,
     // main.ts 是无 LiveEngine 竞争的进程入口面（banner/错误/非 TUI 子命令）。
+    // server/server-info.ts 的 attachOrExit：`rivet serve --attach` 的 CLI 出口
+    // 面（桌面壳经 wsl.exe stdio 握手），write+回调退出防管道截断——语义同
+    // headless.ts 的进程出口，非 TUI 渲染回路。
     // TUI 运行态内的直写（如曾经的 slash-commands /clear）一律违规。
-    const whitelist = ['/tui/engine/', '/__tests__/', '/cli/', 'src/headless.ts', 'src/main.ts', 'src/agent/worker-process/child.ts']
+    const whitelist = ['/tui/engine/', '/__tests__/', '/cli/', 'src/headless.ts', 'src/main.ts', 'src/agent/worker-process/child.ts', 'src/server/server-info.ts']
     const scanned = allSrcFiles.filter(f => !whitelist.some(w => toPosix(f).includes(w)))
     assert.ok(scanned.length > 0, 'guard corpus empty after whitelist — guard would scan nothing')
     const violations = scanPattern(

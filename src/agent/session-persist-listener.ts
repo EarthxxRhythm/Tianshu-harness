@@ -4,6 +4,30 @@ import type { OaiMessage } from '../api/oai-types.js'
 import { debugLog } from '../utils/debug.js'
 
 /**
+ * drain 终值快照（2026-10-02 第四批）：meta.tokenUsage 原只在「消息 append」时
+ * 由本文件 listener 快照——末次 append 之后的记账（turn 末 side-path 等）没有
+ * 快照点，尾账留在内存永失（实测 worker-team-T2 差 4,307 = 恰好最后一条侧路行；
+ * worker-batch-0 同类）。drain 是各出口（worker 收尾 / 主会话 shutdown / 压缩前 /
+ * /cd 迁移前）共享的耐久屏障：屏障内侧补一次 session 终值快照。
+ * 单调守卫：只增不减——宁可少刷不可倒扣（meta 单调递增是对账判据的前提）。
+ * best-effort：快照失败不阻断 drain，flush 仍是权威屏障。
+ */
+export function writeFinalUsageSnapshot(session: SessionContext, persist: SessionPersist): void {
+  try {
+    const usage = session.getTotalUsage()
+    const prevPrompt = persist.loadMetadata()?.tokenUsage?.prompt ?? 0
+    if (usage.input_tokens < prevPrompt) return
+    persist.updateMetadata({
+      tokenUsage: {
+        prompt: usage.input_tokens,
+        completion: usage.output_tokens,
+        total: usage.input_tokens + usage.output_tokens,
+      },
+    })
+  } catch { /* 快照 best-effort；drain 的 flush 仍是权威屏障 */ }
+}
+
+/**
  * Wire the SessionContext mutation listener that mirrors every in-memory
  * message change to durable storage. Extracted verbatim from the AgentLoop
  * constructor (W-L5a) — pure persistence concern, no prefix-cache coupling.
@@ -60,10 +84,15 @@ export function attachSessionPersistListener(deps: {
             // (see Usage in api/types.ts). Adding cache_read/cache_creation on
             // top double-counted the prompt exactly 2x for DeepSeek, where
             // input = hit + miss (cache-log 6bfc4465: meta 11.34M vs real 5.67M).
-            patch.tokenUsage = {
-              prompt: usage.input_tokens,
-              completion: usage.output_tokens,
-              total: usage.input_tokens + usage.output_tokens,
+            // 单调守卫（2026-10-02 第四批）：meta.tokenUsage 是累计账，只增不减
+            // ——续跑 seed（priorUsage）小于盘上已有值时，快照会把尾账连同更早的
+            // 账一起倒扣（实测 worker 案例：meta 冻在更小的旧值）。宁可少刷不可倒扣。
+            if (usage.input_tokens >= (snapshot?.tokenUsage?.prompt ?? 0)) {
+              patch.tokenUsage = {
+                prompt: usage.input_tokens,
+                completion: usage.output_tokens,
+                total: usage.input_tokens + usage.output_tokens,
+              }
             }
             persist.updateMetadata(patch)
           } catch { /* metadata update failures are non-critical */ }
@@ -122,6 +151,10 @@ export function attachSessionPersistListener(deps: {
     return operation
   }
   return { commitCompaction, drain: async () => {
+    // 终值快照（2026-10-02 第四批）：原 drain 只刷已排队的写入，末次 append
+    // 之后的记账（turn 末 side-path 等）没有快照点——尾账永失。见
+    // writeFinalUsageSnapshot（单调守卫同处）。
+    writeFinalUsageSnapshot(session, persist)
     await writeChain
     // P1 write-behind: drain must also flush the pending batch so /cd
     // migration, shutdown, and abort paths leave no unwritten tail.

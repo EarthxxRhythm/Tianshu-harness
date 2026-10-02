@@ -77,3 +77,30 @@ export function stripHostPort(h: string): string {
   const colon = h.lastIndexOf(':')
   return colon > 0 ? h.slice(0, colon) : h
 }
+
+/**
+ * 解析 RIVET_SERVE_HOSTS_ALLOW：逗号分隔、去空、拒绝含 / 或 : 的形态（无端口/无路径）。
+ * 全条目非法时返回 undefined 并 console.warn——保留「忽略」语义但不再静默：否则 LAN
+ * bind + 全非法 allowlist 会无声退化为「任意 Host 放行」（P1 fail-open 缺陷修复）。
+ *
+ * 2026-09 从 serve.ts 迁入：allowlist 是 host 判定的一部分，本文件是 host 策略的
+ * 单一真源（见文件头），此前住在 serve.ts 是位置错误——serve.ts 已触及结构预算
+ * ceiling，沿此接缝拆分。
+ */
+export function parseHostsAllow(raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined
+  const out: string[] = []
+  for (const part of raw.split(',')) {
+    const h = part.trim().toLowerCase()
+    if (!h || h.includes('/') || h.includes(':')) continue
+    out.push(h)
+  }
+  if (out.length === 0) {
+    console.warn(
+      `[serve] RIVET_SERVE_HOSTS_ALLOW="${raw}" had no valid host entries ` +
+        '(each must be a bare hostname/IP without "/" or ":"); allowlist stays ' +
+        'unconfigured — on a LAN bind any Host passes (Bearer remains the only gate).',
+    )
+  }
+  return out.length > 0 ? out : undefined
+}

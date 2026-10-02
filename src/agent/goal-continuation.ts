@@ -1,5 +1,6 @@
 import type { SrClass } from './context.js'
 import type { GoalTracker } from './goal-tracker.js'
+import { GOAL_ROLLOVER_REASON } from './goal-tracker.js'
 import type { GoalJudgeDeps } from './goal-judge.js'
 import { runGoalJudge } from './goal-judge.js'
 import { rejectOnAbort } from './turn-boundary-abort.js'
@@ -128,6 +129,14 @@ export class GoalContinuationController {
       }
     }
 
+    // 接力：暂停（非失败），terminalReason 作为信号交给 session 层编排交接 + 新会话。
+    if (goalResult.reason === 'context_rollover') {
+      tracker.pause(GOAL_ROLLOVER_REASON, 'runtime')
+      this.persistGoalState(tracker)
+      this.deps.flushMeridianTurn()
+      return { kind: 'finalize' }
+    }
+
     // budget/context/wall-clock/cancelled: deactivate
     const deactivationReason = goalResult.reason === 'budget_exhausted' ? 'budget_exhausted'
       : goalResult.reason === 'context_limit' ? 'context_limit'
@@ -137,6 +146,20 @@ export class GoalContinuationController {
     this.persistGoalState(tracker)
     this.deps.flushMeridianTurn()
     return { kind: 'finalize' }
+  }
+
+  /**
+   * 工具轮之间的接力检查（orchestrator 每个工具批次后调用）。handleGoalCheck
+   * 只在模型收尾（无工具调用）时运行，而一次长工具链能从 30% 一路跑到 90%——
+   * 真实模型验证中阈值 40% 实际到 72% 才有机会判定。到阈值即暂停 goal 并返回
+   * true，由调用方结束本 run；交接 run 仍在同一会话里，模型知道刚才做到哪。
+   */
+  requestRolloverIfDue(estimatedTokens: number): boolean {
+    const tracker = this.deps.getGoalTracker()
+    if (!tracker?.isRolloverDue(estimatedTokens)) return false
+    tracker.pause(GOAL_ROLLOVER_REASON, 'runtime')
+    this.persistGoalState(tracker)
+    return true
   }
 
   private persistGoalState(tracker: GoalTracker): void {

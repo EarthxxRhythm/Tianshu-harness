@@ -41,6 +41,20 @@ function extractReasoningTokens(usage: Record<string, unknown>): number | undefi
   return typeof reasoning === 'number' ? reasoning : undefined
 }
 
+/** 缓存读/写 token：Responses 标准位在 `input_tokens_details.cached_tokens` /
+ *  `cache_write_tokens`（codex 后端另有 attribution.items 逐项细分，与标准位
+ *  口径一致时标准位即聚合值——我们只读标准位）。此前两处恒 0 是映射缺口，
+ *  不是「codex 无缓存」的事实（2026-10-02 实测补齐）。 */
+function extractCacheTokens(usage: Record<string, unknown>): { read: number; write: number } {
+  const details = usage.input_tokens_details as Record<string, unknown> | undefined
+  const read = details?.cached_tokens
+  const write = details?.cache_write_tokens
+  return {
+    read: typeof read === 'number' ? read : 0,
+    write: typeof write === 'number' ? write : 0,
+  }
+}
+
 export class CodexClient implements StreamClient {
   constructor(private config: CodexClientConfig) {}
 
@@ -234,7 +248,7 @@ export class CodexClient implements StreamClient {
     const decoder = new TextDecoder()
     let buffer = ''
     let stopReason: string | null = null
-    let usage: { input_tokens?: number; output_tokens?: number; reasoning_tokens?: number } | undefined
+    let usage: { input_tokens?: number; output_tokens?: number; reasoning_tokens?: number; cacheRead?: number; cacheWrite?: number } | undefined
 
     // Track function calls by index
     const functionCalls = new Map<number, { id: string; name: string; arguments: string }>()
@@ -268,6 +282,8 @@ export class CodexClient implements StreamClient {
           input_tokens: pendingMessageItem.msgUsage.input_tokens as number,
           output_tokens: pendingMessageItem.msgUsage.output_tokens as number,
           reasoning_tokens: extractReasoningTokens(pendingMessageItem.msgUsage),
+          cacheRead: extractCacheTokens(pendingMessageItem.msgUsage).read,
+          cacheWrite: extractCacheTokens(pendingMessageItem.msgUsage).write,
         }
       }
       pendingMessageItem = null
@@ -472,6 +488,8 @@ export class CodexClient implements StreamClient {
                   input_tokens: u.input_tokens as number,
                   output_tokens: u.output_tokens as number,
                   reasoning_tokens: extractReasoningTokens(u),
+                  cacheRead: extractCacheTokens(u).read,
+                  cacheWrite: extractCacheTokens(u).write,
                 }
               }
               stopReason = 'stop'
@@ -534,8 +552,8 @@ export class CodexClient implements StreamClient {
     callbacks.onStopReason(stopReason ?? 'stop', {
       input_tokens: usage?.input_tokens ?? 0,
       output_tokens: usage?.output_tokens ?? 0,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: usage?.cacheWrite ?? 0,
+      cache_read_input_tokens: usage?.cacheRead ?? 0,
       reasoning_tokens: usage?.reasoning_tokens,
     })
   }

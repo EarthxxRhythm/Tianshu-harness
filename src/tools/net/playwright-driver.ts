@@ -12,6 +12,7 @@
  * 解析 playwright-core 的类型。
  */
 
+import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 /** playwright-core 模块缺失时的安装引导——区分 CLI 安装用户 / 仓库内开发 / 桌面端。 */
@@ -82,6 +83,125 @@ export function isBrowserMissingError(err: unknown): boolean {
   return msg.includes('Executable') && msg.includes("doesn't exist")
 }
 
+// ── 系统浏览器定位（#303：发行版包管理器装的 chromium 不在 playwright 缓存里）──
+
+/** PATH 查找 + 常见安装位的候选名（chromium 系优先；playwright 经 CDP 驱动它们）。 */
+const SYSTEM_BROWSER_CANDIDATES = [
+  'chromium',
+  'chromium-browser',
+  'google-chrome',
+  'google-chrome-stable',
+  'chrome',
+  'microsoft-edge',
+  'msedge',
+  'brave-browser',
+] as const
+
+/** 各平台常用安装位（PATH 找不到时的补充；存在的才被采用）。 */
+const SYSTEM_BROWSER_ABSOLUTE: Partial<Record<NodeJS.Platform, string[]>> = {
+  darwin: [
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+  ],
+  win32: [
+    'C:\\Program Files\\Chromium\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Chromium\\Application\\chrome.exe',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  ],
+  linux: [
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/snap/bin/chromium',
+    '/var/lib/flatpak/exports/bin/com.github.Eloston.UngoogledChromium',
+  ],
+}
+
+/**
+ * 在系统里找可用的 chromium 系浏览器（纯函数，可注入 platform/PATH/存在性判定）。
+ * 先查 PATH 各目录，再查平台常用安装位；命中第一个存在的可执行文件即返回。
+ * 找不到返回 undefined——调用方回落到 browser-missing 提示。
+ */
+export function findSystemChromium(
+  platform: NodeJS.Platform = process.platform,
+  pathEnv: string = process.env.PATH ?? '',
+  exists: (p: string) => boolean = existsSync,
+): string | undefined {
+  const exe = platform === 'win32' ? (name: string) => `${name}.exe` : (name: string) => name
+  const sep = platform === 'win32' ? ';' : ':'
+  for (const dir of pathEnv.split(sep)) {
+    if (!dir) continue
+    for (const name of SYSTEM_BROWSER_CANDIDATES) {
+      const p = `${dir}/${exe(name)}`
+      try {
+        if (exists(p)) return p
+      } catch {
+        // exists 注入器异常按不存在处理
+      }
+    }
+  }
+  for (const p of SYSTEM_BROWSER_ABSOLUTE[platform] ?? []) {
+    try {
+      if (exists(p)) return p
+    } catch {
+      // 同上
+    }
+  }
+  return undefined
+}
+
+/** 浏览器可执行文件的来源：playwright 托管缓存 / 系统安装。 */
+export type BrowserSource = 'playwright' | 'system'
+
+export interface BrowserPathPick {
+  executablePath?: string
+  source?: BrowserSource
+}
+
+/**
+ * launch 判据的共享内核（#302 check/use 一致性的**单一实现**）：
+ *   1. 托管路径存在（existsSync）→ playwright；
+ *   2. 系统路径命中 → system；
+ *   3. 都没有 → 空（调用方回落 registry 默认解析 / browser-missing）。
+ * 探测侧（browser-readiness.resolveChromiumProbe）与启动侧
+ * （resolveLaunchExecutablePath，及经它的 launchHeadlessChromium / browser-debug）
+ * 都经此收口——判据改一处即两侧生效，防再犯「探测与启动各算各的」双份实现漂移
+ * （#302 的 C 类根因；2026-10-02 审查发现「声称共用、实为两份」后收口）。
+ */
+export function pickBrowserPath(
+  managed: string | undefined,
+  system: string | undefined,
+): BrowserPathPick {
+  if (managed && existsSync(managed)) return { executablePath: managed, source: 'playwright' }
+  if (system) return { executablePath: system, source: 'system' }
+  return {}
+}
+
+/**
+ * 解析 launch 用的浏览器可执行文件路径——显式优先 + pickBrowserPath 判据。
+ * 都没有返回 undefined——调用方回落 playwright registry 默认解析
+ * （headless-shell 专属安装仍兼容）。
+ */
+export function resolveLaunchExecutablePath(
+  chromium: { executablePath?(): string },
+  explicit?: string,
+  findSystem: () => string | undefined = findSystemChromium,
+): string | undefined {
+  if (explicit) return explicit
+  let managed: string | undefined
+  try {
+    managed = chromium.executablePath?.()
+  } catch {
+    // registry 解析失败不致命——还有系统浏览器与默认解析两条路
+  }
+  return pickBrowserPath(managed, findSystem()).executablePath
+}
+
 export interface PwRoute {
   abort(errorCode?: string): Promise<void>
   continue(): Promise<void>
@@ -122,18 +242,28 @@ export interface PwChromium {
 export interface LaunchHeadlessOptions {
   proxy?: { server: string; bypass?: string }
   timeoutMs?: number
+  /** 显式指定浏览器可执行文件（探测到的系统浏览器 / 调用方指定）。 */
+  executablePath?: string
 }
 
 /**
- * 启动 headless chromium（无显式 executablePath——registry 结合
- * PLAYWRIGHT_BROWSERS_PATH 自动定位，桌面端打包浏览器因此零配置生效）。
- * 浏览器缺失时抛带安装提示的友好错误；其余启动错误原样上抛。
+ * 启动 headless chromium。可执行文件定位顺序（#303）：
+ *   1. 显式 opts.executablePath（调用方指定优先）；
+ *   2. playwright 托管的 full chromium（registry 解析 + PLAYWRIGHT_BROWSERS_PATH，
+ *      桌面端打包浏览器零配置生效）——显式透传它同时绕开「检测按 full chromium、
+ *      headless 启动却找 chromium-headless-shell」的 check/use 错位；
+ *   3. 系统浏览器（chromium/chrome/edge/brave，PATH + 常用安装位）——发行版
+ *      包管理器装的浏览器因此直接可用，不必再下 150MB。
+ * 都没有才走 registry 默认解析（headless-shell 专属安装仍兼容）。缺失时抛带
+ * 安装提示的友好错误；其余启动错误原样上抛。
  */
 export async function launchHeadlessChromium(opts: LaunchHeadlessOptions = {}): Promise<PwBrowser> {
-  const mod = (await loadPlaywrightCore()) as { chromium: PwChromium }
+  const mod = (await loadPlaywrightCore()) as { chromium: PwChromium & { executablePath(): string } }
+  const executablePath = resolveLaunchExecutablePath(mod.chromium, opts.executablePath)
   try {
     return await mod.chromium.launch({
       headless: true,
+      ...(executablePath ? { executablePath } : {}),
       ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
       ...(opts.proxy ? { proxy: opts.proxy } : {}),
     })

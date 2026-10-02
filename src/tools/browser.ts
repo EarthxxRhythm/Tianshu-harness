@@ -56,7 +56,7 @@ export interface BrowserToolOptions {
 // 此处 re-export 保持内核调用方不变。
 export { BROWSER_NAVIGATED_PREFIX, BROWSER_SCREENSHOT_OF_PREFIX } from './output-markers.js'
 import { BROWSER_NAVIGATED_PREFIX, BROWSER_SCREENSHOT_OF_PREFIX } from './output-markers.js'
-import { PLAYWRIGHT_INSTALL_HINT, PLAYWRIGHT_CORE_INSTALL_HINT } from './net/playwright-driver.js'
+import { launchHeadlessChromium } from './net/playwright-driver.js'
 
 /** Default allowlist: comma-separated hosts in RIVET_BROWSER_ALLOWLIST. */
 function envAllowlist(): string[] {
@@ -170,20 +170,11 @@ export function createBrowserRequestGuard(
 }
 
 async function playwrightDriver(): Promise<BrowserDriver> {
-  // Dynamic specifier via a variable so tsc doesn't try to resolve the optional
-  // 'playwright-core' types at build time.
-  const specifier = 'playwright-core'
-  let mod: { chromium: { launch: (o: { headless: boolean }) => Promise<unknown> } }
-  try {
-    mod = (await import(specifier)) as never
-  } catch {
-    throw new Error(`未安装 playwright-core。${PLAYWRIGHT_CORE_INSTALL_HINT}`)
-  }
-  const browser = (await mod.chromium.launch({ headless: true })) as {
-    newPage: () => Promise<never>
-    close: () => Promise<void>
-  }
-  const page = (await browser.newPage()) as {
+  // #302：统一走 net/playwright-driver 的 launch 定位（显式 → 托管 full chromium
+  // → 系统浏览器；收编公开仓 PR #320）——与 browser_debug / render-pool 同判据。
+  // 浏览器缺失时由 launchHeadlessChromium 抛带安装提示的友好错误。
+  const browser = await launchHeadlessChromium()
+  const page = (await browser.newPage()) as unknown as {
     goto: (u: string, o: Record<string, unknown>) => Promise<unknown>
     screenshot: (o: Record<string, unknown>) => Promise<Buffer>
     textContent: (s: string) => Promise<string | null>

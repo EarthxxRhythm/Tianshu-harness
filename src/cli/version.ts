@@ -68,9 +68,14 @@ export function readInstallVersion(root: string): string | null {
   }
 }
 
-/** `tianshu-harness vX.Y.Z\n` —— main.ts 与 launcher 共用的 --version 输出。 */
-export function formatVersionLine(scriptPath?: string): string {
+/** 当前安装版本；找不到回退 `unknown`（launcher 的 CLI 编译缓存按它分目录）。 */
+export function currentInstallVersion(scriptPath?: string): string {
   const root = findInstallRoot(scriptPath)
   const version = root ? readInstallVersion(root) : null
-  return `${PACKAGE_NAME} v${version ?? 'unknown'}\n`
+  return version ?? 'unknown'
+}
+
+/** `tianshu-harness vX.Y.Z\n` —— main.ts 与 launcher 共用的 --version 输出。 */
+export function formatVersionLine(scriptPath?: string): string {
+  return `${PACKAGE_NAME} v${currentInstallVersion(scriptPath)}\n`
 }

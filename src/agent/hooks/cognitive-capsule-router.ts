@@ -110,8 +110,13 @@ interface RouteState {
   lastToolTarget: string
   /** Sensorium 预测动量 — 排查停滞规则（P6）的主信号。 */
   momentum: number
-  /** 队尾连续只读（非产出类）工具数 — 排查场景不依赖 filesModified。 */
+  /** 连续只读（非产出类）工具数 — 排查场景不依赖 filesModified。
+   *  来源见 readOnlyStreakSource：生产口径是 recorder 侧独立累计计数，
+   *  不受 5 条窗口容量限制（P6 阈值 6/10 高于窗口上限）。 */
   readOnlyStreak: number
+  /** readOnlyStreak 的事实来源 — 'cumulative' = recorder 侧独立累计（唯一权威）；
+   *  'window' = 事实缺席时的 5 条窗口派生回退（恒 ≤5，低于两个阈值）。 */
+  readOnlyStreakSource: ReadOnlyStreakSource
   /** 队尾有效验证连败数（run_tests/bash 语义失败；TDD 编辑/取证间隔各封顶稀释一次）。 */
   verifyFailStreak: number
   /** 会话活动模式（convergence 的 classifyActivityMode 单一事实源）——
@@ -140,6 +145,44 @@ export function computeReadOnlyStreak(history: ReadonlyArray<HistoryEntry>): num
     streak++
   }
   return streak
+}
+
+/** readOnlyStreak 的事实来源。 */
+export type ReadOnlyStreakSource = 'cumulative' | 'window'
+
+/** 只读连胜事实的读取面（值 + 来源，来源用于遥测与反证）。 */
+export interface ReadOnlyStreakFact {
+  value: number
+  source: ReadOnlyStreakSource
+}
+
+/**
+ * P6 的只读连胜事实来源（S2 可达性修复）。
+ *
+ * 缺陷事实：`recentToolHistory` 是 5 条滑动窗口（tool-history-recorder 的
+ * `length > 5 → shift()` 上限），而 P6 的阈值是 6（build）/ 10（diagnostic）——
+ * 窗口派生值恒 ≤5，P6 在生产里**不可达**（现有单测喂 8-10 条历史才绿，
+ * 真实产出形状永远到不了，属"测试绿而生产死"）。窗口容量是别处的既有契约
+ * （不扩大共享历史），所以连续计数必须由 recorder 侧独立累计并随 snapshot
+ * 下发（`readOnlyStreak`），本函数只做读取 + 缺数据语义。
+ *
+ * 缺失语义：字段缺席（未接线 / 旧固件 / 手工固件）→ 回退窗口派生值（≤5，
+ * 低于两个阈值）——"缺数据不判停滞"，与 P1b 的 momentum no-data 回退同方向：
+ * 读不到事实时不指控停滞。来源经 dimValues.readOnlyStreakCumulative 上报，
+ * 让"事实没送达"可观测——否则接线断裂会静默退化成永不触发。
+ *
+ * 事实在场时它是唯一权威（窗口只是它的末尾子集）：产出工具或新用户任务重置
+ * 计数后窗口仍可能残留旧只读条目，此时以事实为准，不拿陈旧窗口判停滞。
+ */
+export function resolveReadOnlyStreak(snapshot: {
+  recentToolHistory: ReadonlyArray<HistoryEntry>
+  readOnlyStreak?: number
+}): ReadOnlyStreakFact {
+  const reported = snapshot.readOnlyStreak
+  if (typeof reported === 'number' && Number.isFinite(reported) && reported >= 0) {
+    return { value: reported, source: 'cumulative' }
+  }
+  return { value: computeReadOnlyStreak(snapshot.recentToolHistory), source: 'window' }
 }
 
 /**
@@ -258,6 +301,9 @@ const RULES: RouteRule[] = [
     // A1 阈值分级（2026-07-23 信号互扰治理 M2）：诊断态（窗口几乎全只读 =
     // 用户就是让排查）正常取证批次会轻松打到 streak 6——阈值抬到 10；
     // build 态（窗口内有产出工具，干着干着卡进读循环）保持 6，这才是真停滞。
+    // S2 可达性修复（2026-10-02）：streak 现在取 recorder 侧独立累计值——
+    // 5 条窗口上限装不下这两个阈值，此前本规则的 match 恒 false（死规则）。
+    // 线上可达路径是诊断态 10（≥10 连只读 ⇒ 末尾 5 条全只读 ⇒ 仍是诊断态）。
     match: s => s.turn > 5 && s.momentum < 0.35 && s.filesModified === 0
       && s.readOnlyStreak >= (s.activityMode === 'diagnostic' ? 10 : 6),
     busPriority: 0.55,
@@ -412,6 +458,7 @@ export function createCcrHook(opts: CcrHookOptions): PreTurnRuntimeHook {
     evidence: EvidenceState,
     turn: number,
     recentToolHistory: ReadonlyArray<HistoryEntry>,
+    readOnly: ReadOnlyStreakFact,
   ): RouteState {
     const last = recentToolHistory.length > 0
       ? recentToolHistory[recentToolHistory.length - 1]!
@@ -428,7 +475,8 @@ export function createCcrHook(opts: CcrHookOptions): PreTurnRuntimeHook {
       // P1b：momentum 无预测样本时是 0 回退（quality='no-data'），会让 P6 的
       // "momentum < 0.35" 把无数据误判为停滞——回退到 1.0（中性偏乐观）。
       momentum: sensorium.quality?.momentum === 'no-data' ? 1.0 : (sensorium.momentum ?? 1.0),
-      readOnlyStreak: computeReadOnlyStreak(recentToolHistory),
+      readOnlyStreak: readOnly.value,
+      readOnlyStreakSource: readOnly.source,
       verifyFailStreak: computeVerifyFailStreak(recentToolHistory),
       activityMode: classifyActivityMode(recentToolHistory, evidence.filesModified.size),
     }
@@ -449,7 +497,7 @@ export function createCcrHook(opts: CcrHookOptions): PreTurnRuntimeHook {
         lastVerifyTurn = turn
       }
 
-      const state = extractRouteState(sensorium, vigor, evidence, turn, recentToolHistory)
+      const state = extractRouteState(sensorium, vigor, evidence, turn, recentToolHistory, resolveReadOnlyStreak(ctx.snapshot))
 
       for (const rule of RULES) {
         if (!rule.match(state)) continue
@@ -535,6 +583,9 @@ export function createCcrHook(opts: CcrHookOptions): PreTurnRuntimeHook {
             verifyFailStreak: state.verifyFailStreak,
             // Wave C 共现标定：诊断态=1（dimValues 只收 number）
             activityModeDiagnostic: state.activityMode === 'diagnostic' ? 1 : 0,
+            // S2 接线取证：1 = 只读连胜来自 recorder 累计事实；0 = 事实缺席、
+            // 回退到 5 条窗口派生值（P6 因此不可达）。接线断裂不再静默。
+            readOnlyStreakCumulative: state.readOnlyStreakSource === 'cumulative' ? 1 : 0,
           },
           dynamicPool,
         })

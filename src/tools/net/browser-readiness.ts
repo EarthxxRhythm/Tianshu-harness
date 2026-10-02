@@ -9,8 +9,7 @@
  * 缺失时的提示统一复用 net/playwright-driver 的 PLAYWRIGHT_MANUAL_INSTALL_HINT，
  * 并指向一键命令 `rivet browser install`，避免多处文案漂移。
  */
-import { existsSync } from 'node:fs'
-import { loadPlaywrightCore, PLAYWRIGHT_MANUAL_INSTALL_HINT, PLAYWRIGHT_CORE_INSTALL_HINT } from './playwright-driver.js'
+import { findSystemChromium, loadPlaywrightCore, pickBrowserPath, PLAYWRIGHT_MANUAL_INSTALL_HINT, PLAYWRIGHT_CORE_INSTALL_HINT } from './playwright-driver.js'
 
 export type BrowserReadyState =
   | 'ready' // chromium 可执行文件就位
@@ -21,6 +20,8 @@ export interface ChromiumProbe {
   state: BrowserReadyState
   installed: boolean
   executablePath?: string
+  /** 可执行文件来源：playwright 托管缓存 vs 系统浏览器（#303）。ready 时有值。 */
+  source?: 'playwright' | 'system'
   /** 人类可读的缺失原因（module-missing / browser-missing 时有值）。 */
   reason?: string
 }
@@ -31,8 +32,32 @@ interface PwChromiumProbe {
 }
 
 /**
+ * 就绪判定的纯函数核心：托管路径存在 → ready(playwright)；否则系统浏览器
+ * 命中 → ready(system)；都没有 → browser-missing。判据经 pickBrowserPath
+ * 与启动侧（launchHeadlessChromium / browser-debug）**共用同一实现**——
+ * check/use 不再各算各的（#302 C 根因的收口；2026-10-02 审查发现后落实）。
+ */
+export function resolveChromiumProbe(
+  managedExecutablePath: string | undefined,
+  systemPath: string | undefined,
+): ChromiumProbe {
+  const pick = pickBrowserPath(managedExecutablePath, systemPath)
+  if (pick.executablePath) {
+    return { state: 'ready', installed: true, executablePath: pick.executablePath, source: pick.source }
+  }
+  return {
+    state: 'browser-missing',
+    installed: false,
+    executablePath: managedExecutablePath || undefined,
+    reason: 'chromium 可执行文件不存在（未下载，且未找到系统浏览器）',
+  }
+}
+
+/**
  * 探测 chromium 是否就绪。**不启动浏览器**——只解析预期可执行路径并检查文件存在。
  * 三态区分让上层能给出精准提示（装浏览器 vs 修依赖）。
+ * #303：playwright 托管缓存缺失时追加系统浏览器探测（PATH + 常用安装位），
+ * 发行版包管理器装的 chromium 直接判 ready，不必下 150MB。
  */
 export async function probeChromium(): Promise<ChromiumProbe> {
   let mod: { chromium: PwChromiumProbe }
@@ -48,23 +73,11 @@ export async function probeChromium(): Promise<ChromiumProbe> {
     }
   }
   try {
-    const exePath = mod.chromium.executablePath()
-    if (exePath && existsSync(exePath)) {
-      return { state: 'ready', installed: true, executablePath: exePath }
-    }
-    return {
-      state: 'browser-missing',
-      installed: false,
-      executablePath: exePath || undefined,
-      reason: 'chromium 可执行文件不存在（未下载）',
-    }
+    return resolveChromiumProbe(mod.chromium.executablePath(), findSystemChromium())
   } catch (err) {
-    // executablePath() 在极少数配置下也会抛——按浏览器缺失处理（可安装解决）。
-    return {
-      state: 'browser-missing',
-      installed: false,
-      reason: err instanceof Error ? err.message.split('\n')[0] : String(err),
-    }
+    // executablePath() 在极少数配置下也会抛——托管路径放弃，系统浏览器探测仍跑一次。
+    void err
+    return resolveChromiumProbe(undefined, findSystemChromium())
   }
 }
 

@@ -547,3 +547,40 @@ describe('wrapCallbacksWithHeartbeat', () => {
     }
   })
 })
+
+describe('wrapCallbacksWithHeartbeat — 静默恢复补报（#334）', () => {
+  it('恢复时补发一次 working 相位；无新静默不重复补发', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const phases: string[] = []
+    const hb = new TurnHeartbeat({
+      silentMs: 100,
+      repeatMs: 100,
+      hardStallMs: 0, // 本用例不涉及硬停机
+      onHeartbeat: () => {},
+    })
+    const wrapped = wrapCallbacksWithHeartbeat({
+      onTextDelta: () => {},
+      onThinkingDelta: () => {},
+      onToolUse: () => {},
+      onToolResult: () => {},
+      onTurnComplete: () => {},
+      onError: () => {},
+      onAbort: () => {},
+      onPhaseChange: (phase: string) => { phases.push(phase) },
+    } as never, hb)
+    try {
+      hb.start()
+      mock.timers.tick(100)
+      assert.equal(phases.length, 0, '心跳本身不得补发 working（heartbeat 相位由生产者直发）')
+      assert.equal(hb.hasFiredSinceTick(), true, '前置：静默已上报过')
+      wrapped.onThinkingDelta('resume')
+      assert.deepEqual(phases, ['working'], '恢复时补发一次 working')
+      assert.equal(hb.hasFiredSinceTick(), false, 'tick 后标志清零')
+      wrapped.onThinkingDelta('again')
+      assert.deepEqual(phases, ['working'], '无新静默不重复补发')
+    } finally {
+      hb.stop()
+      mock.timers.reset()
+    }
+  })
+})

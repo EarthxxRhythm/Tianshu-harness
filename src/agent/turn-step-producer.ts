@@ -1,3 +1,4 @@
+import { getTodos } from '../tools/todo.js'
 import type { AgentLoop } from './loop.js'
 import type { AgentCallbacks } from './loop-types.js'
 import type { OaiChatRequest } from '../api/oai-types.js'
@@ -5,6 +6,7 @@ import type { Sensorium, StrategyProfile } from './sensorium.js'
 import { TurnHeartbeat } from './turn-heartbeat.js'
 import { wrapCallbacksWithHeartbeat } from './turn-orchestrator.js'
 import { debugLog } from '../utils/debug.js'
+import { emitCvmInterception } from './cvm-notice.js'
 import { endsWithInterruptMarker } from './interrupt-marker.js'
 import { recordAppendixTrace } from './appendix-trace.js'
 import { createTraceStore } from './trace-store.js'
@@ -40,7 +42,7 @@ import { EXPLORATION_SIGNAL_RE } from './collab-branches.js'
 import { selectCollabAdvisories } from './collab-branch-advisories.js'
 import { buildCognitiveProjectionParts, createCognitiveLedger, getCognitivePhaseSnapshot } from '../context/cognitive-ledger.js'
 import { formatImmuneContext } from './immune-context.js'
-import { VITALS_LITE_KIND } from './telemetry-writer.js'
+import { VITALS_LITE_KIND, CVM_VECTOR_DECISION_KIND } from './telemetry-writer.js'
 import { getCapsuleByStar } from './seed-capsule-store.js'
 import { signalFromLedgerDelta, signalsFromDelivered, signalsFromObligations } from './control-plane-adapters.js'
 import { renderControlPlaneAppendix } from './control-plane.js'
@@ -101,16 +103,8 @@ export function isDocOrConfigOnly(targets: string[]): boolean {
 }
 
 /** Map StarPhase values to PromptEngine phaseClass strings. */
-export const PHASE_CLASS_MAP: Record<string, string> = {
-  'tianshu-planning': 'plan',
-  'tianxuan-locating': 'explore',
-  'tianji-decomposing': 'plan',
-  'tianquan-contracting': 'plan',
-  'yuheng-implementing': 'execute',
-  'kaiyang-testing': 'verify',
-  'yaoguang-delivering': 'deliver',
-  'tianshu-encore': 'plan',
-}
+import { PHASE_CLASS_MAP } from './phase-class.js'
+export { PHASE_CLASS_MAP } from './phase-class.js'
 
 /**
  * Turn-step producer (loop.ts terminal-wave extraction): the prompt-assembly
@@ -168,9 +162,9 @@ export class TurnStepProducer {
       // sessions keep the tight default.
       hardStallMs: resolveHardStallMs(this.self.config),
       onHeartbeat: (elapsed, lastActivity) => {
-        const seconds = Math.round(elapsed / 1000)
         callbacks.onPhaseChange?.('heartbeat', {
-          reason: `still working — last activity: ${lastActivity} (${seconds}s ago)`,
+          reason: `still working — last activity: ${lastActivity} (${Math.round(elapsed / 1000)}s ago)`,
+          meta: { silentSeconds: Math.round(elapsed / 1000), lastActivity }, // #334：结构化静默通道（桌面端按 locale 组装，不解析英文 reason）
         })
       },
       onHardStall: (elapsed, lastActivity) => {
@@ -273,6 +267,10 @@ export class TurnStepProducer {
     }
 
     this.self.session.addUserMessage(userInput, images)
+    // S2 CCR 可达性：用户边界重置连续只读流水。上一段排查（哪怕是同一个
+    // 会话）的只读流水不能当成"新任务也在原地打转"的证据——用户刚重新
+    // 定义了问题，CCR P6 的计时从零开始。
+    this.self.resetReadOnlyStreak()
     this.self.requestContext.activeUserMessage = this.self.session.getMessages().at(-1)
     const turnMode = classifyTurnMode(userInput, this.self.taskContract)
     this.lastTurnMode = turnMode
@@ -297,6 +295,14 @@ export class TurnStepProducer {
       }
     } else if (!this.self.taskContract || this.self.taskContract.status === 'ready_to_deliver') {
       this.self.taskContract = undefined
+    }
+
+    if (turnMode !== 'followUp') {
+      this.self.todoTaskContext = { key: this.self.todoTaskContext.key + 1, startTurn: this.self.modelObservationTurn + 1,
+        initialSignature: JSON.stringify((this.self.config.getTodos ?? getTodos)()),
+        multiStep: turnMode === 'task' && (Boolean(this.self.activePlanFilePath)
+          || (this.self.taskContract?.successCriteria.length ?? 0) >= 3
+          || (userInput.match(/^\s*\d+[.)、]\s*\S/gm)?.length ?? 0) >= 3) }
     }
 
     // 收口：intent 分类（网络等待）与 worktree 检测（git 子进程）并行等待——
@@ -602,7 +608,7 @@ export class TurnStepProducer {
         })
         if (decision.classification || decision.candidate || decision.yielded) {
           this.self.telemetryWriter.write({
-            kind: 'cvm-vector-decision',
+            kind: CVM_VECTOR_DECISION_KIND,
             turn,
             mode: this.self.cvmVector.mode,
             classification: decision.classification?.kind ?? null,
@@ -612,6 +618,8 @@ export class TurnStepProducer {
             yielded: decision.yielded,
           })
         }
+        // issue #247：本会话拦截计数（台账口径）+ 用户可见提示；分级与文案见 agent/cvm-notice.ts
+        emitCvmInterception(this.self.session, callbacks, decision, this.self.cvmVector.mode, turn)
         if (this.self.cvmVector.mode === 'active' && decision.candidate) {
           // attack_case 已是 CORE 常驻（2026-07-17，26→27）——绝不在会话中途
           // enableTool：改 tool fingerprint = 200K 前缀全量重建（V4 创建 ¥3/M、
@@ -681,14 +689,11 @@ export class TurnStepProducer {
     }
 
     // P1a 核销闭环：把本轮实际送达的条目（含 expect 谓词）交给 readback 跟踪。
-    // 必须与 runtime hook snapshot 使用同一 session turn 时钟；这里的 `turn` 是
-    // TurnOrchestrator.run 局部序号，而 postTool/postTurn 观察事件使用 session
-    // turn。混用会让 B2 在局部 turn=13 送达、事件却落在 session turn=2，
-    // course_changed 永远无法核销。
+    // 投递、观察、响应完成都使用跨用户请求单调递增的 modelObservationTurn。
     // 控制面 tee（Wave 2）：单次 drain → 不可变快照 → 多路分发。readback 与
     // control adapter 消费同一快照；adapter 绝不自行 drain（一次性消费边界）。
     const deliveredSnapshot = this.self.advisoryBus.drainDelivered()
-    this.self.advisoryReadback.track(deliveredSnapshot, this.self.session.getTurnCount())
+    this.self.advisoryReadback.track(deliveredSnapshot, this.self.modelObservationTurn)
     this.self.controlPlane.submitAll(signalsFromDelivered(deliveredSnapshot))
 
     // Phase 0 观测：advisory 投递账本落盘（仅有活动时写，避免遥测噪音），
@@ -1026,6 +1031,7 @@ export class TurnStepProducer {
     phaseClass: string
     pressureResult: import('../context/pressure-monitor.js').PressureResult
   }> {
+    this.self.modelObservationTurn++
     // ── StarFlow v2: Sensorium computation ──
     const pressureResult = this.self.pressureMonitor.check(estTokens, this.self.session.getTurnCount())
     if (this.lastTurnMode === 'chat') {
@@ -1046,6 +1052,7 @@ export class TurnStepProducer {
 
     const _tb = Date.now()
     const perceptionResult = await this.self.perception.perceive({
+      modelTurn: this.self.modelObservationTurn,
       turn,
       estimatedTokens: estTokens,
       pressureResult,

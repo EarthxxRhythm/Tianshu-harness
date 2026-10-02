@@ -15,8 +15,8 @@ Usage:
   rivet [options]                    interactive TUI (requires TTY)
   rivet -p "<prompt>" [--json] [--stream-json]   headless one-shot
   rivet --goal "<task>" [--budget N] [--json] [--stream-json]   headless goal mode
-  rivet sessions                     list sessions and exit
-  rivet logs                         list log locations and exit
+  rivet serve [--port N] [--host ADDR] [--attach] [--json]   runtime API server
+  rivet sessions | rivet logs        list sessions / log locations and exit
 
 Options:
   --model <name>           use a specific model (e.g. deepseek-v4-pro)

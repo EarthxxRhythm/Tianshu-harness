@@ -1,3 +1,4 @@
+import { budget, facts } from './advice-facts-fixture.js'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { AdvisoryBus, type AdvisoryEntry } from '../advisory-bus.js'
@@ -114,6 +115,7 @@ describe('W3-C2 expect eligibility inventory (five audited keys)', () => {
     // context-pressure: status explanation → informational tier, no expect.
     const pressure = createContextPressureHook({
       getEstimatedTokens: () => 90_000,
+      adviceFacts: facts(() => budget({ inputTokens: 90_000, inputBudget: 100_000 })),
       getContextWindow: () => 100_000,
       advisoryBus: bus,
     })

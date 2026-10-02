@@ -1,29 +1,17 @@
+import { currentAdviceBudget, sessionStateAdvice, type RuntimeAdviceFacts } from '../runtime-advice-facts.js'
 import type { PostTurnRuntimeHook, RuntimeHookContext } from '../runtime-hooks.js'
 import type { AdvisoryBus } from '../advisory-bus.js'
 import type { SrClass } from '../context.js'
 
 /**
- * Wrapup-Anxiety Guard（焦虑收尾对冲）— postTurn hook。
- *
- * 失败模式：模型基于"习惯性上下文焦虑"（而非物理事实）建议收尾/开新会话。
- * 实例（session 20b9714e）：mirror 显示 ctx="10%·1M" 时输出"剩余 T3-T6
- * 交给新会话"——判断与实测数据相差一个数量级。
- *
- * 机制：正则匹配本 turn 流式文本中的收尾话术（中英文直接 + 间接措辞组），
- * 命中后与实测 ctxRatio 对照，三段阈值：
- *   - ratio < 0.5     → 注入硬数据反驳 advisory（话术不基于物理事实）
- *   - 0.5 ≤ ratio < 0.7 → 灰区，不注入（既不反驳也不附和——此区间焦虑
- *                        话术可能确实有道理，反驳是 false positive 风险区）
- *   - ratio ≥ 0.7     → 不触发（context-pressure hook 的收束建议在此区间合法）
- *
- * 阈值 0.5 若实测偏保守，由 vitals-lite 遥测回放校准，不在 v1 猜。
- * 反驳双通道投递（对齐 pointer-regurgitation 的必达修法）：advisory 留痕遥测，
- * 反驳正文经 addSystemReminder 走 functional 通道（不限流——discipline 每轮
- * 限 1 条，易被更高优先级条目挤掉；本 hook 自带 cooldown 闩锁，满足
- * functional 通道"调用方自带闩锁"前提）。
+ * Correct context-based wrap-up claims using a fresh, model-matching input budget.
+ * Only ready budgets below 50% qualify. Provider measurements support a factual
+ * correction; local estimates only support a neutral notice, never a guarantee.
+ * Existing phrase detection, five-turn cooldown and functional delivery remain.
  */
 
 export interface WrapupAnxietyGuardHookDeps {
+  adviceFacts?: RuntimeAdviceFacts
   advisoryBus: Pick<AdvisoryBus, 'submit'>
   /** 本 turn 的流式 assistant 文本（与 dedup-guard 同款 getter）。 */
   getStreamedText: () => string
@@ -90,13 +78,9 @@ export function createWrapupAnxietyGuardHook(deps: WrapupAnxietyGuardHookDeps): 
       const phrase = detectWrapupPhrase(text)
       if (!phrase) return
 
-      const estimated = deps.getEstimatedTokens()
-      const window = deps.getContextWindow()
-      if (window <= 0 || estimated <= 0) return
-
-      const ratio = estimated / window
-      // 三段阈值：只在 ratio < refuteBelow 反驳。灰区（refuteBelow ~ 0.7）
-      // 与高压区（≥0.7，context-pressure 已合法建议收束）都不注入。
+      const budget = currentAdviceBudget(deps.adviceFacts)
+      if (!budget || budget.state !== 'ready') return
+      const ratio = budget.inputTokens / budget.inputBudget
       if (ratio >= refuteBelow) return
 
       const turn = ctx.snapshot.turn
@@ -104,10 +88,9 @@ export function createWrapupAnxietyGuardHook(deps: WrapupAnxietyGuardHookDeps): 
       lastFiredTurn = turn
 
       const pct = Math.round(ratio * 100)
-      const windowLabel = window >= 1_000_000
-        ? `${Math.round(window / 1_000_000)}M`
-        : `${Math.round(window / 1000)}K`
-      const refutation = `你刚提到"${phrase.slice(0, 40)}"，但实测上下文使用率仅 ${pct}%（窗口 ${windowLabel}）——该判断不基于物理事实，是习惯性焦虑。上下文余量充足，继续当前任务；需要确认时用 session_vitals 取证，以实测为准。`
+      const refutation = budget.source === 'measured'
+        ? `最近请求测量的输入预算占用为 ${pct}%；这不支持仅凭上下文不足而提前收尾。请按用户要求与任务证据决定下一步。${sessionStateAdvice(deps.adviceFacts)}`
+        : `本地估算的输入预算占用为 ${pct}%，并非提供商实测；不能据此保证余量充足。请按当前任务边界处理，缺少依据的判断标注未核实。`
       deps.advisoryBus.submit({
         key: 'wrapup-anxiety-guard',
         priority: 0.65,

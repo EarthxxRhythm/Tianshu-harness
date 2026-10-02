@@ -11,10 +11,11 @@
  * - 可打印字符（UTF-8）：直接分发
  * - 控制字符（Ctrl+A..Z, Tab, Enter, Escape, Backspace）
  * - ANSI escape sequences（方向键、Home/End、PgUp/PgDn、F1-F12）
- * - 鼠标事件（SGR mouse protocol）— 暂不处理
+ * - 鼠标事件（SGR mouse protocol）— 独立分发，不进入文本输入
  */
 
 import type { ReadStream } from 'node:tty'
+import type { MousePress } from './fullscreen-engine.js'
 
 export interface KeyPress {
   /** 按键原始字符串 */
@@ -69,6 +70,7 @@ export type KeyName =
   | 'ctrl_v'
   | 'ctrl_b'
   | 'ctrl_f'
+  | 'ctrl_g'
   | 'ctrl_x'
   | 'ctrl_]'
   | 'ctrl_minus'
@@ -125,6 +127,7 @@ const CTRL_CODES: Record<number, KeyName> = {
   0x04: 'ctrl_d',
   0x05: 'ctrl_e',
   0x06: 'ctrl_f',
+  0x07: 'ctrl_g',
   0x08: 'ctrl_h', // 同时也映射为 backspace
   0x09: 'tab',
   0x0a: 'ctrl_j', // Ctrl+J = LF
@@ -190,7 +193,7 @@ const ANSI_ESCAPE_MAP: Record<string, KeyName> = {
  * 等历史同码语义自动对齐）。xterm modifyOtherKeys level 2 与 kitty 同形，
  * 同一解析器双方言覆盖。
  */
-function parseCsiU(seq: string): { name: KeyName; ctrl: boolean; meta: boolean; shift: boolean } | null {
+function parseCsiU(seq: string): { name: KeyName; char?: string; ctrl: boolean; meta: boolean; shift: boolean } | null {
   const m = seq.match(/^\x1B\[(\d+)(?:;(\d+))?(?:;\d+)*u$/)
   if (!m) return null
   const cp = Number(m[1])
@@ -211,7 +214,7 @@ function parseCsiU(seq: string): { name: KeyName; ctrl: boolean; meta: boolean; 
       if (name) return { name, ctrl, meta, shift }
     }
   }
-  return { name: 'unknown', ctrl, meta, shift }
+  return { name: 'unknown', char: !ctrl && meta && cp >= 32 && cp <= 126 ? String.fromCodePoint(cp) : '', ctrl, meta, shift }
 }
 
 export class InputHandler {
@@ -222,6 +225,9 @@ export class InputHandler {
   /** CPR（cursor position report）处理器：终端对 DSR `\x1B[6n` 的响应
    *  `\x1B[{row};{col}R` 不是按键，单独走这个通道（LiveEngine 自愈用）。 */
   private cprHandlers = new Set<(row: number, col: number) => void>()
+  private mouseHandlers = new Set<(event: MousePress) => void>()
+  private suspended = false
+  private disposed = false
   /** Kitty keyboard protocol 能力响应处理器：`\x1B[?u` 查询的回包
    *  `\x1B[?<flags>u` 不是按键，单独走这个通道（footer 提示诚实化用）。 */
   private kittyFlagsHandlers = new Set<(flags: number) => void>()
@@ -289,6 +295,27 @@ export class InputHandler {
     return () => { this.cprHandlers.delete(handler) }
   }
 
+  onMouse(handler: (event: MousePress) => void): () => void {
+    this.mouseHandlers.add(handler)
+    return () => { this.mouseHandlers.delete(handler) }
+  }
+
+  setSuspended(suspended: boolean): void {
+    if (this.disposed) return
+    this.suspended = suspended
+    if (suspended) {
+      this.stdin.pause()
+      if (this.escapeTimer) clearTimeout(this.escapeTimer)
+      this.escapeTimer = null
+      this.pendingData = ''
+      this.inputBuffer = ''
+      this.pasteActive = false
+      this.pasteBuffer = ''
+    }
+    if (this.stdin.isTTY) { try { this.stdin.setRawMode(!suspended) } catch { /* Host may have closed. */ } }
+    if (!suspended) this.stdin.resume()
+  }
+
   /** 注册 kitty keyboard protocol 能力响应处理器（`\x1B[?u` 查询的回包
    *  `\x1B[?<flags>u`，flags 为终端当前生效位掩码）。收到回包即证明终端
    *  支持该协议——Shift+Enter 等修饰键可区分，footer 提示据此裁剪。 */
@@ -317,6 +344,8 @@ export class InputHandler {
 
   /** 关闭 raw mode，恢复终端默认行为。 */
   dispose(): void {
+    this.setSuspended(true)
+    this.disposed = true
     if (this.escapeTimer) {
       clearTimeout(this.escapeTimer)
       this.escapeTimer = null
@@ -338,6 +367,7 @@ export class InputHandler {
   // ── internal ─────────────────────────────────────────────────
 
   private handleData(data: string): void {
+    if (this.suspended) return
     // 0. 拼接上次未处理完的代理对片段
     if (this.pendingData) {
       data = this.pendingData + data
@@ -371,7 +401,7 @@ export class InputHandler {
    */
   private dispatchKeys(buf: string): number {
     let i = 0
-    while (i < buf.length) {
+    while (i < buf.length && !this.suspended) {
       const parsed = this.parseInput(buf.slice(i))
       if (parsed.consumed === 0) break // 未完整序列，等后续字节
       if (parsed.key) this.dispatch(parsed.key) // CPR 等非按键事件只消费不派发
@@ -382,7 +412,7 @@ export class InputHandler {
 
   /** 处理跨 chunk 缓冲的输入缓冲区，按 paste → ESC 序列 → 普通字符优先级解析。 */
   private processInputBuffer(): void {
-    while (this.inputBuffer.length > 0) {
+    while (this.inputBuffer.length > 0 && !this.suspended) {
       // 1. 进行中的 paste：累积直到结束标记
       if (this.pasteActive) {
         const endIdx = this.inputBuffer.indexOf(PASTE_END)
@@ -417,6 +447,7 @@ export class InputHandler {
       if (startIdx !== -1) {
         const prefix = this.inputBuffer.slice(0, startIdx)
         const consumed = this.dispatchKeys(prefix)
+        if (this.suspended) return
         if (consumed < prefix.length) {
           // 前缀里有未完整的按键，先保留，等下一 chunk 再处理
           this.inputBuffer = this.inputBuffer.slice(consumed)
@@ -468,7 +499,7 @@ export class InputHandler {
         // CPR 残体整段丢弃，不走「消费 ESC + 剩余重解析」那条路：CPR 是终端对
         // DSR 探针的自动回吐，不是用户输入，剥掉 ESC 后剩下的 `[66;1R` 会被逐字
         // 当可打印字符送进输入框（用户看到的就是输入框里冒出 `[66;`）。
-        if (CPR_PARTIAL_RE.test(this.inputBuffer)) {
+        if (CPR_PARTIAL_RE.test(this.inputBuffer) || this.inputBuffer.startsWith('\x1B[<')) {
           this.inputBuffer = ''
           return
         }
@@ -520,6 +551,16 @@ export class InputHandler {
       // Kitty keyboard protocol 查询回包 `\x1B[?<flags>u`：不是按键——
       // 路由给 kittyFlagsHandlers（key=null + consumed>0，消费后继续解析）。
       // 须在通用 CSI 匹配之前：`?` 不在 [0-9;] 内，否则会落入未知 ESC 路径。
+      const mouse = data.match(/^\x1B\[<(\d+);(\d+);(\d+)([mM])/)
+      if (mouse) {
+        const button = Number(mouse[1])
+        const event: MousePress = { button, x: Number(mouse[2]), y: Number(mouse[3]),
+          type: button & 64 ? 'wheel' : mouse[4] === 'm' ? 'release' : button & 32 ? 'move' : 'press',
+          ctrl: !!(button & 16), shift: !!(button & 4), meta: !!(button & 8) }
+        for (const handler of this.mouseHandlers) handler(event)
+        return { key: null, consumed: mouse[0].length }
+      }
+      if (data.startsWith('\x1B[<')) return { key: null, consumed: 0 }
       const kittyQueryMatch = data.match(/^\x1B\[\?(\d+)u/)
       if (kittyQueryMatch) {
         for (const handler of this.kittyFlagsHandlers) handler(Number(kittyQueryMatch[1]))
@@ -543,14 +584,15 @@ export class InputHandler {
         const csiU = parseCsiU(seq)
         if (csiU) {
           return {
-            key: { raw: seq, char: '', name: csiU.name, ctrl: csiU.ctrl, meta: csiU.meta, shift: csiU.shift },
+            key: { raw: seq, char: csiU.char ?? '', name: csiU.name, ctrl: csiU.ctrl, meta: csiU.meta, shift: csiU.shift },
             consumed: seq.length,
           }
         }
         const name = this.resolveEscapeSequence(seq)
-        const meta = seq.includes(';3') || seq.includes(';4')
-        const shift = seq.includes(';2') || name === 'shift_tab'
-        return { key: { raw: seq, char: '', name: name ?? 'unknown', ctrl: false, meta, shift }, consumed: seq.length }
+        const modifier = Number(seq.match(/;(\d+)[A-Za-z~]$/)?.[1] ?? 1) - 1
+        const meta = (modifier & 2) !== 0
+        const shift = (modifier & 1) !== 0 || name === 'shift_tab'
+        return { key: { raw: seq, char: '', name: name ?? 'unknown', ctrl: (modifier & 4) !== 0, meta, shift }, consumed: seq.length }
       }
 
       // SS3 序列（F1-F4 等）
@@ -564,7 +606,11 @@ export class InputHandler {
       // Alt/Meta + 可打印字符（\x1B 后跟非 [ 非 O 的字符）
       // 终端将 Alt+key 编码为 ESC + key。如 Alt+f → \x1Bf。
       if (data.length >= 2 && data[1] !== '[' && data[1] !== 'O') {
-        const char = data[1]!
+        const char = String.fromCodePoint(data.codePointAt(1)!)
+        const consumed = 1 + char.length
+        if (char === '\x7f' || char === '\x08') {
+          return { key: { raw: data.slice(0, 2), char: '', name: 'backspace', ctrl: false, meta: true, shift: false }, consumed: 2 }
+        }
         // Alt+Enter: ESC + CR → 与 Kitty \x1B[13;3u 对齐为 return + meta
         if (char === '\r') {
           return {
@@ -574,8 +620,8 @@ export class InputHandler {
         }
         const isUpper = char >= 'A' && char <= 'Z'
         return {
-          key: { raw: data.slice(0, 2), char, name: 'unknown', ctrl: false, meta: true, shift: isUpper },
-          consumed: 2,
+          key: { raw: data.slice(0, consumed), char, name: 'unknown', ctrl: false, meta: true, shift: isUpper },
+          consumed,
         }
       }
 
@@ -628,7 +674,7 @@ export class InputHandler {
     // 处理带修饰键的序列（如 \x1B[1;5A = Ctrl+Up）
     const modMatch = body.match(/^\[(\d+);(\d+)([A-HF~])$/)
     if (modMatch) {
-      const suffix = `[${modMatch[3]}`
+      const suffix = modMatch[3] === '~' ? `[${modMatch[1]}~` : `[${modMatch[3]}`
       const baseName = ANSI_ESCAPE_MAP[suffix]
       if (baseName) return baseName
     }

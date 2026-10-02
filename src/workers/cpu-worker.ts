@@ -7,12 +7,16 @@
  * `{ id, task, args }` and the worker replies `{ id, ok, result }` (or
  * `{ id, ok: false, error }` on failure).
  *
- * No process/env access, no fs, no tui — pure computation only.
+ * Event-tail tasks read their file directly, keeping log strings out of messages.
  */
 
 import { parentPort } from 'node:worker_threads'
 // @ts-ignore — tsx dev worker uses .ts extension; tsup bundles this file separately
-import { diffUnifiedRaw, diffStructuredRaw, diffLinesRaw, parseEventsJsonlRaw, parseEventsTailRaw, esbuildTransformRaw, astScanRaw, astEditComputeRaw } from './cpu-tasks.ts'
+import { diffUnifiedRaw, diffStructuredRaw, diffLinesRaw, parseEventsJsonlRaw, parseEventsTailRaw, esbuildTransformRaw, esbuildStopRaw, astScanRaw, astEditComputeRaw } from './cpu-tasks.ts'
+// @ts-ignore — worker source runs with Node's native type stripping.
+import { readEventsTailRaw } from './events-tail.ts'
+// @ts-ignore — worker source runs with Node's native type stripping.
+import { readEventsTailIndexed } from './events-summary.ts'
 
 type TaskFn = (...args: any[]) => unknown
 
@@ -22,7 +26,10 @@ const tasks: Record<string, TaskFn> = {
   diffLinesRaw: diffLinesRaw as TaskFn,
   parseEventsJsonlRaw: parseEventsJsonlRaw as TaskFn,
   parseEventsTailRaw: parseEventsTailRaw as TaskFn,
+  readEventsTailRaw: readEventsTailRaw as TaskFn,
+  readEventsTailIndexed: readEventsTailIndexed as TaskFn,
   esbuildTransformRaw: esbuildTransformRaw as TaskFn,
+  esbuildStopRaw: esbuildStopRaw as TaskFn,
   astScanRaw: astScanRaw as TaskFn,
   astEditComputeRaw: astEditComputeRaw as TaskFn,
 }

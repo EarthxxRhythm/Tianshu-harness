@@ -39,17 +39,21 @@ describe('isB2ConvergingRecently — B2 收敛轨迹门（会话 506a5e86 优化
     assert.equal(isB2ConvergingRecently([0.9]), false)
   })
 
-  it('最近样本均值 ≥ 0.4 → true（轨迹收敛，静默）', () => {
+  it('最近样本均值 ≥ 0.6 → true（轨迹收敛，静默；bar 对齐 detector L1 线）', () => {
     // [0.9, 0.5] → avg 0.7
     assert.equal(isB2ConvergingRecently([0.9, 0.5]), true)
-    // [0.5, 0.3] → avg 0.4 恰过线
-    assert.equal(isB2ConvergingRecently([0.5, 0.3]), true)
+    // [0.5, 0.7] → avg 0.6 恰过线（含等号边界）
+    assert.equal(isB2ConvergingRecently([0.5, 0.7]), true)
     // 持续收敛
     assert.equal(isB2ConvergingRecently([0.9, 0.8, 0.7]), true)
   })
 
-  it('均值 < 0.4 → false（轨迹发散，照发）', () => {
+  it('均值 < 0.6 → false（轨迹发散，照发；含旧 bar=0.4 的回退保护）', () => {
     assert.equal(isB2ConvergingRecently([0.2, 0.3, 0.2]), false)
+    // avg 0.5 落在 0.4-0.6 疑似区：当前 bar 下不静默。若 bar 被回退到 0.4，
+    // 本断言变 true → 红——其余默认参数用例在 0.4/0.6 下同绿（抓不住回退），
+    // 本条是 bar 标定的唯一直接保护；行为契约面由 b2-mode 用例兜底。
+    assert.equal(isB2ConvergingRecently([0.5, 0.5]), false)
   })
 
   it('只看最近 window=3 个样本：旧高分不掩盖最近转坏', () => {

@@ -14,8 +14,7 @@
  * 失效：安装/启停/卸载插件后 invalidatePluginToolsCache 重建——生效语义与
  * 技能装载一致（下一个新会话生效，不做会话内热切换）。
  */
-import { initializePlugins, type PluginConfig, type PluginHookEntry, type PluginCommandEntry } from '../plugins/plugin-loader.js'
-import { createDefaultToolRegistry } from '../tools/default-registry.js'
+import type { PluginConfig, PluginHookEntry, PluginCommandEntry } from '../plugins/plugin-loader.js'
 import type { Tool } from '../tools/types.js'
 
 export interface PluginToolsSnapshot {
@@ -34,6 +33,12 @@ let loading: Promise<PluginToolsSnapshot> | null = null
 let pendingWarm: { config: PluginConfig | undefined; cwd: string } | null = null
 
 async function buildSnapshot(config: PluginConfig | undefined, cwd: string): Promise<PluginToolsSnapshot> {
+  // serve 启动图瘦身：default-registry / plugin-loader 改在暖场函数内动态
+  // import——listen 前的静态图只留本模块的同步快照 API。
+  const [{ createDefaultToolRegistry }, { initializePlugins }] = await Promise.all([
+    import('../tools/default-registry.js'),
+    import('../plugins/plugin-loader.js'),
+  ])
   // 冲突检测基座必须是内置工具全集——不能用空表：plugin-loader 的 existingNames
   // 读的就是传入的 registry，空表下冲突永不触发，同名插件工具随后经 serve-agent
   // 的 register（Map.set）静默覆盖内置工具。TUI 侧同类回归见 main.ts:494

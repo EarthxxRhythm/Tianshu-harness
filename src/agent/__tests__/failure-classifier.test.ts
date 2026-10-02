@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { classifyFailure, classifyTestRun, classifyToolFailure, isTransient, isTestRunInvocation, isReadProbeInvocation, resolveErrorKind } from '../failure-classifier.js'
+import { isImmunityNeutralized, isConvergenceTransient } from '../tool-history-recorder.js'
 
 describe('classifyFailure', () => {
   it('classifies TS type errors correctly', () => {
@@ -400,5 +401,21 @@ describe('classifyFailure — api_error 需要 HTTP 语义上下文（不吃裸�
       !/Transient API error/.test(result.suggestion),
       'suggestion 不得把模型引向「等一会儿重试」',
     )
+  })
+})
+
+describe('delivery_gate（T3：交付门禁失败的结构化分类）', () => {
+  it('结构通道直读：confidence 1、不可重试、建议指向阻塞项', () => {
+    const f = classifyToolFailure({ errorKind: 'delivery_gate' }, '❌ File(s) not in owned files: src/other.ts. Cannot commit non-owned files.')
+    assert.equal(f.class, 'delivery_gate')
+    assert.equal(f.confidence, 1)
+    assert.equal(f.retryable, false)
+    assert.match(f.suggestion, /阻塞项/)
+  })
+
+  it('豁免表核对：门禁失败是全惩罚的工作信号，不进任何豁免/瞬时表', () => {
+    assert.equal(isTransient('delivery_gate'), false)
+    assert.equal(isImmunityNeutralized(undefined, 'delivery_gate'), false)
+    assert.equal(isConvergenceTransient('delivery_gate'), false)
   })
 })

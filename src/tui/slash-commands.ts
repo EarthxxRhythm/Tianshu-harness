@@ -1,7 +1,7 @@
 import type { AgentLoop } from '../agent/loop.js'
 import type { SessionContext } from '../agent/context.js'
-import { looksLikeFilePath } from './engine/app.js'
 import { catalogMetaFor } from './command-catalog.js'
+import { resolveAppPromptInput } from './prompt-input-resolver.js'
 import { SessionPersist, getSessionDir } from '../agent/session-persist.js'
 import { forkSession, listBranches, countMessageLines } from '../agent/session-fork.js'
 import { type StarDomainId } from '../agent/star-domain.js'
@@ -11,7 +11,6 @@ import { getCapsuleByStar, listCapsuleStars } from '../agent/seed-capsule-store.
 import { microCompactOai, estimateOaiTokens } from '../compact/micro.js'
 import { rollbackToCheckpoint, getRollbackPreview } from '../agent/checkpoint.js'
 import { runResumePreflightOai } from '../context/resume-preflight.js'
-import { resolveCustomCommand } from '../commands/loader.js'
 import { trustProject, untrustProject, isProjectTrusted, listTrustedProjects, isTrustPromptDismissed } from '../config/project-trust.js'
 import { getTheme, setTheme, getActiveThemeName, THEMES, listCustomThemes } from './theme.js'
 import {
@@ -36,7 +35,6 @@ import type { ContextClaimStore } from '../context/claim-store.js'
 import type { ContextClaimStatus } from '../context/claims.js'
 import { loadProjectRules } from '../context/rules-loader.js'
 import { exportDurableClaims, importClaims } from '../context/claim-export.js'
-import { resolveEcosystemWorkflowInput } from '../workflows/ecosystem-workflows.js'
 import { formatVolatilePayloadReport } from '../context/payload-diagnostic.js'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
@@ -48,7 +46,7 @@ import { approvePlanWithGuards } from '../plan/plan-approval.js'
 import { fullRebuild, generateCodebaseIndexBlock, getHeadSha } from '../repo/codebase-index.js'
 import { isDiagramType, buildDiagramDoc, renderDiagramBlock, formatDiagramList } from './diagram-templates.js'
 import { renderRecoveryStack } from '../agent/recovery-stack.js'
-import { skillRegistry, listSkillFiles, importSkillsIntoRivet, countInstalledSkills, RECOMMENDED_MAX_SKILLS, SKILL_RESTRAINT_NOTICE } from '../skills/skill-loader.js'
+import { skillRegistry, importSkillsIntoRivet, countInstalledSkills, RECOMMENDED_MAX_SKILLS, SKILL_RESTRAINT_NOTICE } from '../skills/skill-loader.js'
 import { listSkillDrafts, approveSkillDraft, rejectSkillDraft } from '../agent/skill-distill.js'
 import { formatReviewHealthLine } from '../agent/review-health.js'
 import {
@@ -77,14 +75,17 @@ import { switchAgentRuntime, switchAgentSession, switchAgentCwd } from '../boots
 // /new 及其共用的会话切换复原逻辑——独立模块，避免本文件巨石继续膨胀
 //（architecture-guards 的 max-lines ratchet 只降不升）。
 import { applySessionSwitch, registerNewSessionCommand } from './new-session.js'
+import { registerCvmNoticeCommand } from './cvm-notice-command.js'
 import { rememberUserNote, listUserNotes } from '../memory/user-remember.js'
 import { formatPermissionLabel, parsePermissionAlias, tierToMode } from '../agent/approval-vocabulary.js'
 import { isToolAllowed, isToolDenied, isBashCommandAllowlisted, isBashCommandDenied } from '../agent/permissions.js'
 import { getMirrorConfig, setMirrorConfig, setCheckpointConfig, setApprovalMode as persistApprovalDefault } from '../config/manager.js'
 import { grantPath, listPersistedGrants } from '../tools/path-grants.js'
+import { buildPermissionView } from './permission-view.js'
 import { SettingsFlow } from './settings-flow.js'
 import { runZenSlash } from './zen-command.js'
 import { loadSettingsDraft, loadSettingsEnv, saveSettings } from './settings-persist.js'
+import { applyFrontendSettings } from './frontend-session-provider.js'
 import { formatMirrorStatus } from '../tools/mirror-env.js'
 import { detectEnv, formatEnvGuidance, recommendUvSetup, isPythonProject } from '../tools/env-check.js'
 import { getResolvedEnv, getResolvedPathDiff } from '../tools/resolved-env.js'
@@ -134,6 +135,8 @@ export interface SlashHandlerContext {
   /** Open the interactive /init scaffolding wizard (verify / skills / hooks).
    *  Wired by the TUI; undefined → /init prints a hint to use /init verify. */
   openInitFlow?: () => void
+  openHelp?: () => void
+  openPermissions?: () => void
   /** Runtime cwd switch for /cd <path>. Rebuilds the agent runtime against the
    *  new working directory with frozen-snapshot inheritance (prefix cache only
    *  tail-cuts at the next user boundary). Async: drains pending persist writes
@@ -368,107 +371,11 @@ export function searchMemory(ctx: SlashHandlerContext, query: string): string {
   return hits.length === 0 ? `No memory found for "${query}".` : `Memory search: ${query}\n${hits.map(h => `- ${h}`).join('\n')}`
 }
 
-export interface ResolvedPromptInput {
-  prompt: string
-  /** 见 WorkflowResolveResult.requiredTools。仅 ecosystem workflow 路径可能非空。 */
-  requiredTools?: readonly string[]
-}
-
-export function resolveAppPromptInput(
-  input: string,
-  cwd: string,
-  isKnownCommand?: (name: string) => boolean,
-  pluginCommands?: { name: string; file: string }[],
-): ResolvedPromptInput | null {
-  if (!input.startsWith('/')) return { prompt: input }
-  const workflow = resolveEcosystemWorkflowInput(input)
-  if (workflow) return { prompt: workflow.prompt, requiredTools: workflow.requiredTools }
-  const custom = resolveCustomCommand(cwd, input, pluginCommands)
-  if (custom) return { prompt: custom }
-  const skillPrompt = resolveSkillPrompt(input, cwd)
-  if (skillPrompt !== null) return { prompt: skillPrompt }
-  // /review off|on|status 是 TUI 本地会话开关——本路径（server/headless 映射层）没有
-  // refs 可写。明确告知，而不是把 "off" 误当 focus 触发一次审查（白烧 worker token）。
-  if (/^\/review\s+(?:off|on|status)\s*$/i.test(input)) {
-    return { prompt: `User typed "${input}". /review off|on|status is a TUI-local session toggle (auto-review gate) that this surface cannot flip. To disable auto review here, set review.skipAuto in config (desktop: Settings → Routing); manual /review [max] keeps working either way.` }
-  }
-  // /review [max|l1|l2|l3] [focus description] — map to deliver_task instruction for the agent
-  const reviewMatch = input.match(/^\/review(?:\s+(max|l1|l2|l3))?(?:\s+(.*))?$/i)
-  if (reviewMatch) {
-    const kw = reviewMatch[1]?.toLowerCase()
-    const focusText = reviewMatch[2]?.trim()
-    const level: 'L1' | 'L2' | 'L3' = kw === 'max' || kw === 'l3' ? 'L3' : kw === 'l1' ? 'L1' : 'L2'
-    const levelLabel = level === 'L3'
-      ? 'L3 Review Squadron (5 inspectors)'
-      : level === 'L1'
-        ? 'L1 nudge (review-discipline reminder, zero review workers)'
-        : 'L2 adversarial verifier'
-    const focusInstruction = focusText ? ` Focus specifically on: ${focusText}.` : ''
-    return { prompt: `Run code review on the current uncommitted changes: call deliver_task with commit=true and review_level="${level}". This triggers ${levelLabel}.${focusInstruction}` }
-  }
-  // /review typos — don't silently drop user input
-  if (/^\/review/i.test(input)) {
-    return { prompt: `User typed "${input}" which looks like a /review command but didn't match the expected format. Usage: /review [max] [focus description]. Run /review max to trigger L3 Review Squadron.` }
-  }
-  // 裸技能名直调（issue #100 建议②）：/name [task]——内置/workflow/自定义/网关
-  // 均未命中后的兜底。必须放在 looksLikeFilePath 之前：单段 /name 在
-  // isKnownCommand 谓词下会被判成「路径」原样透传，技能解析永远轮不到
-  // （多段路径天然不匹配技能名，/etc 类单段路径无同名技能时仍落回路径分支）。
-  const bareSkill = resolveBareSkillPrompt(input)
-  if (bareSkill !== null) return { prompt: bareSkill }
-  // Linux/WSL path like /etc, /mnt, /usr — not a recognized command, pass through
-  // as plain text so the agent can handle it (e.g. "look at /etc/hosts").
-  if (looksLikeFilePath(input, isKnownCommand)) return { prompt: input }
-  // Unrecognized slash command — return null to signal "blocked"
-  return null
-}
-
-const SKILL_RESERVED_SUBCOMMANDS = new Set(['list', 'ls', 'install', 'import', 'review', 'drafts', 'approve', 'reject', 'off', 'complete'])
-
-/** 技能查找 + prompt 展开（/skill 网关与裸名直调共用）。未命中返回 null。 */
-function buildSkillPrompt(name: string, userTask: string): string | null {
-  const skill = skillRegistry.get(name) ?? skillRegistry.list().find(s => s.name.toLowerCase() === name.toLowerCase())
-  if (!skill) return null
-  let prompt = `[Skill loaded: ${skill.name}]\n<skill name="${skill.name}">\n${skill.body}\n</skill>`
-  if (skill.skillDir) {
-    const files = listSkillFiles(skill.skillDir)
-    if (files.length > 0) {
-      prompt += `\n<skill-files dir="${skill.skillDir}" note="Read on demand with read_file/grep/glob; page large sub-files completely with offset/limit.">\n${files.map(f => '  ' + f.path).join('\n')}\n</skill-files>`
-    }
-  }
-  if (userTask) {
-    prompt += `\n\nUser task: ${userTask}`
-  }
-  return prompt
-}
-
-/**
- * Resolve `/skill <name> [user task...]` into the skill's full body prompt.
- * Reserved subcommands (list/install/etc.) and unknown skills return null so
- * they fall back to the slash handler's local behavior or error message.
- */
-function resolveSkillPrompt(input: string, cwd: string): string | null {
-  const match = input.trim().match(/^\/skill\s+(\S+)(?:\s+(.*))?$/s)
-  if (!match) return null
-  const name = match[1]!
-  if (SKILL_RESERVED_SUBCOMMANDS.has(name.toLowerCase())) return null
-  return buildSkillPrompt(name, match[2]?.trim() ?? '')
-}
-
-/**
- * 裸技能名直调（issue #100 建议②，Claude Code「技能即斜杠命令」形态）：
- * `/name [task...]` 命中技能注册表则展开为 skill prompt。只在内置/workflow/
- * 自定义/网关全部未命中后兜底——同名技能被内置遮蔽但仍可经 /skill <name>
- * 显式唤起。多段路径天然不匹配（技能名不含 /）；单段路径（/etc）只有用户
- * 真建了同名技能才会被接管——那正是用户意图。
- */
-export function resolveBareSkillPrompt(input: string): string | null {
-  const match = input.trim().match(/^\/([^\s/]+)(?:\s+(.*))?$/s)
-  if (!match) return null
-  const name = match[1]!
-  if (SKILL_RESERVED_SUBCOMMANDS.has(name.toLowerCase())) return null
-  return buildSkillPrompt(name, match[2]?.trim() ?? '')
-}
+// prompt 解析（resolveAppPromptInput / 技能 helper）已迁到叶子模块
+// src/tui/prompt-input-resolver.ts：serve 侧 session-routes 直接从叶子导入，
+// 不再经本文件把 bootstrap/TUI 主图带进 sidecar 启动图。再导出保持
+// main.ts / 既有测试的 import 面不变（本文件内部仍用 resolveAppPromptInput）。
+export { resolveAppPromptInput, resolveBareSkillPrompt, type ResolvedPromptInput } from './prompt-input-resolver.js'
 
 /**
  * Resolve `/enter <worker-id-or-label> [message]` into a prompt that resumes
@@ -613,9 +520,9 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
     name: '/help',
     immediate: true,
     handler(ctx) {
-      const { parts, pushStatic, setIsStreaming } = ctx
-      const cmd = parts[0]!.toLowerCase()
-      pushStatic(createLogEntry({ type: 'system', content: HELP_TEXT }))
+      const { pushStatic, setIsStreaming } = ctx
+      if (ctx.openHelp) ctx.openHelp()
+      else pushStatic(createLogEntry({ type: 'system', content: HELP_TEXT }))
       setIsStreaming(false)
       return true
 
@@ -1167,7 +1074,9 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         return true
       }
       // 项目内 .rivet/ 在工作区内（auto-safe 免审批）；会话目录在工作区外会触发路径审批。
-      const projectPath = join(agent.cwd, '.rivet', 'HANDOFF.md')
+      // projectPath 归一正斜杠：它进入给模型的交接指令文本与归档登记（跨平台期望
+      // 一致；Windows 的 join 产出反斜杠会泄漏平台分隔符——fs 两种都接受）。
+      const projectPath = join(agent.cwd, '.rivet', 'HANDOFF.md').replaceAll('\\', '/')
       const archivePath = join(getSessionDir(agent.cwd), `${ctx.currentSessionId}.handoff.md`)
       // 归档登记：交接 turn 完成后 TUI 把项目内文档拷贝归档到会话目录
       // （loadPrevHandoff 注入管线认 <id>.handoff.md）。
@@ -1653,7 +1562,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       const cmd = parts[0]!.toLowerCase()
       const nextVerbose = !ctx.verboseRef.current
       ctx.setVerbose(nextVerbose)
-      pushStatic(createLogEntry({ type: 'system', content: nextVerbose ? 'Verbose mode: on (show 200 lines)' : 'Verbose mode: off (show 20 lines)' }))
+      pushStatic(createLogEntry({ type: 'system', content: nextVerbose ? '详细输出已开启：后续工具卡片完整展开并显示参数。' : '详细输出已关闭：后续工具输出恢复默认折叠，Ctrl+O 可展开。' }))
       setIsStreaming(false)
       return true
     },
@@ -1768,8 +1677,8 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
 
       if (!sub) {
         // 无参数 → 弹出交互式权限选择面板（上下选 + 回车确认，同 /effort 风格，kimi-code 对标）
-        ctx.setChoicePanelKind?.('permission')
-        ctx.surfacePush?.('choice-panel')
+        if (ctx.openPermissions) ctx.openPermissions()
+        else { ctx.setChoicePanelKind?.('permission'); ctx.surfacePush?.('choice-panel') }
         setIsStreaming(false)
         return true
       }
@@ -1907,7 +1816,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
           setIsStreaming(false)
           return true
         }
-        const kind = kindRaw as 'allow' | 'deny' | 'bashAllow' | 'bashDeny'
+        const kind = kindRaw === 'bashallow' ? 'bashAllow' : kindRaw === 'bashdeny' ? 'bashDeny' : kindRaw as 'allow' | 'deny'
         const idx = parseInt(target, 10)
         const key = Number.isNaN(idx) ? target : idx
         const ok = agent.removePermissionRule(kind, key)
@@ -2305,7 +2214,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
   {
     name: '/debug',
     immediate: true,
-    handler(ctx) {
+    async handler(ctx) {
       const { parts, pushStatic, setIsStreaming } = ctx
       const cmd = parts[0]!.toLowerCase()
       const subcmd = parts[1]
@@ -2325,8 +2234,35 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         pushStatic(createLogEntry({ type: 'system', content: formatVolatilePayloadReport(info.volatilePayloadReport) }))
       } else if (subcmd === 'mcp') {
         pushStatic(createLogEntry({ type: 'system', content: mcpStatusText(ctx.mcpManagerRef.current) }))
+      } else if (subcmd === 'cvm') {
+        // CVM 拦截台账的事后查询入口（issue #249）。数据源是 sensorium.jsonl 的
+        // cvm-vector-decision 行——不新增采集，只把已有台账聚合出来。
+        // 可选 argv：/debug cvm <sessionId> 查历史会话，缺省查当前会话。
+        const { resolveLogLocations } = await import('../diagnostics/log-locations.js')
+        const { summarizeCvmLedger, formatCvmLedgerSummary } = await import('./format/cvm-ledger.js')
+        const { existsSync, readFileSync } = await import('node:fs')
+        const sessionId = parts[2] ?? ctx.currentSessionId
+        const report = resolveLogLocations({
+          cwd: ctx.agent.cwd,
+          ...(sessionId ? { sessionId } : {}),
+        })
+        const path = report.locations.find((l) => l.id === 'sensorium')?.path ?? ''
+        // fail-open：读不出来就当空台账（渲染层会指向 /logs 与门控），不让排查命令自己抛。
+        let text = ''
+        if (path && existsSync(path)) {
+          try {
+            text = readFileSync(path, 'utf8')
+          } catch {
+            text = ''
+          }
+        }
+        const summary = summarizeCvmLedger(text.split('\n'))
+        pushStatic(createLogEntry({
+          type: 'system',
+          content: formatCvmLedgerSummary(summary, { ...(sessionId ? { sessionId } : {}), path }),
+        }))
       } else {
-        pushStatic(createLogEntry({ type: 'system', content: 'Usage: /debug [prompt|fingerprint|cache|context-payload|mcp]' }))
+        pushStatic(createLogEntry({ type: 'system', content: 'Usage: /debug [prompt|fingerprint|cache|context-payload|mcp|cvm]' }))
       }
       setIsStreaming(false)
       return true
@@ -3951,6 +3887,8 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
         if (res.ok) applySessionSwitch(app, ctx, targetId)
         return res
       },
+      openPermissions: () => app.openPermissionPanel(() => buildPermissionView({ cwd: ctx.agent.cwd, trusted: isProjectTrusted(ctx.agent.cwd), mode: ctx.agent.config.approvalMode ?? 'manual', config: ctx.agent.config.permissions, overlay: ctx.agent.config.permissionsOverlay, grants: listPersistedGrants(ctx.agent.cwd) }), command => { void app.tryDispatchSlash(command).catch(error => app.commitStatic(String(error))) }, (path, mode) => { try { grantPath(path, mode, { persist: true, cwd: ctx.agent.cwd }); app.commitStatic(`已授权并记住 ${mode === 'write' ? '读写' : '只读'}访问 ${path}`) } catch (error) { app.commitStatic(`目录授权失败：${String(error)}`) } }),
+      openHelp: () => { app.activateOverlay('help') },
       openSessionPicker: () => { app.activateOverlay('chronicle') },
       openInitFlow: () => { app.openInitFlow(ctx.agent.cwd) },
       onCwdSwitch: async (target: string) => {
@@ -3976,7 +3914,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       cacheHitRate: metrics?.cacheHitRate ?? cacheHitRate,
       autoSafeRef,
       verboseRef,
-      setVerbose: (v: boolean) => { verboseRef.current = v },
+      setVerbose: (v: boolean) => { verboseRef.current = v; app.setVerbose(v) },
       setAutoSafe: (v: boolean) => { autoSafeRef.current = v },
       persistApprovalMode: (mode: string) => { try { persistApprovalDefault(mode) } catch { /* best-effort persist */ } },
       rollbackTokenRef,
@@ -4072,6 +4010,10 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
 
   // /queue：显式排队 lane（handler 在 registerQueueCommand，独立导出供单测注册）。
   registerQueueCommand(app)
+
+  // /cvm：CVM 拦截提示的级别开关（issue #247 第 2 条）。实现在独立模块——与
+  // /new、/queue 同一处置（本文件是点名巨石，只降不升）。
+  registerCvmNoticeCommand(app)
 
   // /new：会话中途开新会话（对齐 Claude Code 的 /clear——同进程换一段干净上下文）。
   // 与 /clear 同走 register 形式：busy 守卫与清屏需要 app 句柄。实现在
@@ -4198,10 +4140,9 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
   })
 
   register("/pager", {
-    description: "Open scrollback pager",
+    description: "浏览完整会话阅读历史",
     immediate: true,
-    overlay: "pager",
-    handler: () => true,
+    handler: () => { app.openUIHistory(); return true },
   })
 
   register("/rewind", {
@@ -4359,6 +4300,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
   const openSettingsPanel = (): boolean => {
     const flow = new SettingsFlow(loadSettingsDraft(), loadSettingsEnv())
     app.startSettings(flow, request => saveSettings(request, {
+      onFrontendChange: prefs => applyFrontendSettings(app, prefs),
       // 审批模式是唯一要同步到「正在跑的会话」的字段：落盘之外还得改 agent
       // 与 badge，否则用户看着面板改了、当前会话仍按旧模式放行。
       onApprovalChange: (mode: string) => {

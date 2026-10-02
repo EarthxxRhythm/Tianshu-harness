@@ -1,7 +1,10 @@
 import { createRequire } from 'node:module'
-import { test } from 'node:test'
+import { describe, it, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { formatBrowserMissingBanner, probeChromium, type ChromiumProbe } from '../browser-readiness.js'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { formatBrowserMissingBanner, probeChromium, resolveChromiumProbe, type ChromiumProbe } from '../browser-readiness.js'
 
 test('banner is empty when chromium is installed', () => {
   assert.equal(formatBrowserMissingBanner({ state: 'ready', installed: true, executablePath: '/x' }), '')
@@ -38,7 +41,36 @@ test('probeChromium returns a well-formed three-state result on this machine', a
   assert.equal(typeof p.installed, 'boolean')
   // installed ⟺ state==='ready'
   assert.equal(p.installed, p.state === 'ready')
-  if (p.installed) assert.ok(p.executablePath, 'ready probe carries an executablePath')
+  if (p.installed) {
+    assert.ok(p.executablePath, 'ready probe carries an executablePath')
+    assert.ok(['playwright', 'system'].includes(p.source ?? ''), 'ready probe carries a source')
+  }
+})
+
+describe('resolveChromiumProbe（#303 系统浏览器分支）', () => {
+  it('托管缓存存在 → ready(playwright)，系统浏览器不再看', () => {
+    const managed = join(mkdtempSync(join(tmpdir(), 'pw-managed-')), 'chrome')
+    writeFileSync(managed, '')
+    const p = resolveChromiumProbe(managed, '/usr/bin/chromium')
+    assert.equal(p.state, 'ready')
+    assert.equal(p.source, 'playwright')
+    assert.equal(p.executablePath, managed)
+  })
+
+  it('托管缓存缺失 + 系统浏览器命中 → ready(system)', () => {
+    const p = resolveChromiumProbe('/nonexistent/pw/chrome', '/usr/bin/chromium')
+    assert.equal(p.state, 'ready')
+    assert.equal(p.source, 'system')
+    assert.equal(p.executablePath, '/usr/bin/chromium')
+  })
+
+  it('两者皆无 → browser-missing，带托管路径与原因', () => {
+    const p = resolveChromiumProbe('/nonexistent/pw/chrome', undefined)
+    assert.equal(p.state, 'browser-missing')
+    assert.equal(p.installed, false)
+    assert.equal(p.executablePath, '/nonexistent/pw/chrome')
+    assert.match(p.reason ?? '', /未下载/)
+  })
 })
 
 // NOTE: probeChromium 的 browser-missing 分支已用**子进程**（PLAYWRIGHT_BROWSERS_PATH

@@ -323,7 +323,7 @@ export const EFFICACY_BASE_COOLDOWN_RENDERS = 2
 
 /** 会话内 per-key 效能计数查询 — 由 AdvisoryReadback 会话统计实现 */
 export interface EfficacyStatsProvider {
-  (key: string): { delivered: number; adopted: number } | null
+  (key: string): { delivered: number; adopted: number; decided?: number; pending?: boolean } | null
 }
 
 // ─── T7 效力排序（2026-08-04 advisory 反馈环）──────────────────────
@@ -481,8 +481,10 @@ export class AdvisoryBus {
   private overheadThrottled = false
   // ── W2 efficacy 负反馈环 ──
   private efficacyStats: EfficacyStatsProvider | null = null
-  /** 本会话被 efficacy 环静默的 key（delivered ≥ 6 且零采纳） */
+  /** 有界静音的 key（decided ≥ 6 且零采纳）。 */
   private efficacySilenced = new Set<string>()
+  private efficacyMuteRemaining = new Map<string, number>()
+  private efficacyProbation = new Set<string>()
   /** key → 剩余冷却渲染周期数 */
   private efficacyCooldownRemaining = new Map<string, number>()
   /** key → 上次冷却长度（下次送达时翻倍） */
@@ -566,6 +568,7 @@ export class AdvisoryBus {
   /** 静音中的 key（习惯化 + 负 lift）— cockpit advisory 面板观测口。 */
   getSilencedKeys(): Array<{ key: string; remaining: number; reason: 'habituation' | 'lift' }> {
     return [
+      ...[...this.efficacyMuteRemaining].map(([key, remaining]) => ({ key, remaining, reason: 'habituation' as const })),
       ...[...this.silenceRemaining].map(([key, remaining]) => ({ key, remaining, reason: 'habituation' as const })),
       ...[...this.liftMuteRemaining].map(([key, remaining]) => ({ key, remaining, reason: 'lift' as const })),
     ]
@@ -699,6 +702,7 @@ export class AdvisoryBus {
    */
   drainDelivered(): DeliveredAdvisory[] {
     const out = this.delivered
+    for (const entry of out) if (!entry.shadow) this.efficacyProbation.delete(entry.key)
     this.delivered = []
     return out
   }
@@ -843,10 +847,14 @@ export class AdvisoryBus {
       const droppedSilenced = new Set<string>()
       const kept: AdvisoryEntry[] = []
       for (const e of all) {
-        if (e.tier === 'constitutional') {
+        // 豁免同 lift/efficacy，但不含 star_domain——星域条目由 evaluator 每轮重提，是熔断最该管的来源（incident 20b9714e）。
+        if (!e.expect || e.tier === 'constitutional' || e.priority >= 0.8 || e.immediate) {
           kept.push(e)
           continue
         }
+        const efficacy = this.efficacyStats?.(e.key)
+        if (efficacy?.adopted === 0 && (efficacy.decided ?? 0) >= EFFICACY_COOLDOWN_DELIVERED) { kept.push(e); continue }
+        if (this.efficacySilenced.has(e.key) || this.efficacyProbation.has(e.key)) { kept.push(e); continue }
         if (this.silenceRemaining.has(e.key)) {
           droppedSilenced.add(e.key)
           continue
@@ -870,52 +878,42 @@ export class AdvisoryBus {
       all = kept
     }
 
-    // ── W2 efficacy 负反馈环:发射前回读会话内 delivered/adopted ──
-    // delivered ≥ 3 且零采纳 → 冷却翻倍;delivered ≥ 6 仍零采纳 → 会话内静默。
-    // 与习惯化静音（ignoredStreak,依赖 expect 谓词）互补:无 expect 的 key
-    // （如 convergence 的多数变体）ignored 永远是 0,只有这条环能拦住它。
+    // Efficacy uses completed observations only. Unobserved advice is not ignored.
+    // Six zero-adoption decisions mute for ten renders, then permit one trial.
     if (this.efficacyStats) {
-      for (const [k, v] of this.efficacyCooldownRemaining) {
-        if (v <= 1) this.efficacyCooldownRemaining.delete(k)
-        else this.efficacyCooldownRemaining.set(k, v - 1)
+      for (const [key, n] of this.efficacyMuteRemaining) {
+        if (n <= 1) { this.efficacyMuteRemaining.delete(key); this.efficacySilenced.delete(key); this.efficacyProbation.add(key) }
+        else this.efficacyMuteRemaining.set(key, n - 1)
       }
-      const droppedByEfficacy = new Set<string>()
-      const kept: AdvisoryEntry[] = []
-      for (const e of all) {
-        // fail-open:constitutional / 高优先级条目永不受负反馈环约束
-        if (e.tier === 'constitutional' || e.priority >= 0.8) {
-          kept.push(e)
-          continue
-        }
-        if (this.efficacySilenced.has(e.key)) {
-          droppedByEfficacy.add(e.key)
-          continue
-        }
-        const stats = this.efficacyStats(e.key)
-        if (!stats || stats.adopted > 0) {
-          kept.push(e)
-          continue
-        }
-        if (stats.delivered >= EFFICACY_SILENCE_DELIVERED) {
-          this.efficacySilenced.add(e.key)
-          droppedByEfficacy.add(e.key)
-          continue
-        }
-        if (stats.delivered >= EFFICACY_COOLDOWN_DELIVERED) {
-          if (this.efficacyCooldownRemaining.has(e.key)) {
-            droppedByEfficacy.add(e.key)
-            continue
-          }
-          // 放行本次送达,并把下次冷却翻倍（2→4→8…）
-          const next = (this.efficacyCooldownLength.get(e.key) ?? EFFICACY_BASE_COOLDOWN_RENDERS / 2) * 2
-          this.efficacyCooldownLength.set(e.key, next)
-          this.efficacyCooldownRemaining.set(e.key, next)
-        }
-        kept.push(e)
+      for (const [key, n] of this.efficacyCooldownRemaining) {
+        if (n <= 1) this.efficacyCooldownRemaining.delete(key)
+        else this.efficacyCooldownRemaining.set(key, n - 1)
       }
-      this.recordDropped(droppedByEfficacy)
-      all = kept
-
+      const dropped = new Set<string>()
+      all = all.filter(e => {
+        if (!e.expect || e.tier === 'constitutional' || e.priority >= 0.8 || e.immediate || e.category === 'star_domain') return true
+        const stats = this.efficacyStats!(e.key)
+        if (!stats || stats.decided === undefined) return true
+        if (stats.pending) { dropped.add(e.key); return false }
+        if (stats.adopted > 0) {
+          this.efficacySilenced.delete(e.key); this.efficacyMuteRemaining.delete(e.key); this.efficacyProbation.delete(e.key)
+          return true
+        }
+        const block = () => { dropped.add(e.key); return false }
+        if (this.efficacySilenced.has(e.key)) return block()
+        if (this.efficacyProbation.has(e.key)) return true
+        if (stats.decided >= EFFICACY_SILENCE_DELIVERED) {
+          this.efficacySilenced.add(e.key); this.efficacyMuteRemaining.set(e.key, LIFT_MUTE_RENDERS)
+          return block()
+        }
+        if (stats.decided >= EFFICACY_COOLDOWN_DELIVERED) {
+          if (this.efficacyCooldownRemaining.has(e.key)) return block()
+          const n = Math.min(LIFT_MUTE_RENDERS, (this.efficacyCooldownLength.get(e.key) ?? 1) * 2)
+          this.efficacyCooldownLength.set(e.key, n); this.efficacyCooldownRemaining.set(e.key, n)
+        }
+        return true
+      })
+      this.recordDropped(dropped)
       // ── T6 efficacy 正向臂：累计采纳 ≥3 → 冷却减半，有效 priority 排序加成 ──
       // 负向臂让"说了没人听"的 key 退场，正向臂让"说了有人听"的 key 加速送达。
       // 设计写"连续采纳 ≥3"，当前实现为累计 adopted ≥3（readback 无 adoptedStreak）。
@@ -958,7 +956,7 @@ export class AdvisoryBus {
       const droppedByLift = new Set<string>()
       const kept: AdvisoryEntry[] = []
       for (const e of all) {
-        const exempt = e.tier === 'constitutional' || e.immediate === true || e.category === 'star_domain'
+        const exempt = e.tier === 'constitutional' || e.immediate === true || e.category === 'star_domain' || this.efficacyProbation.has(e.key)
         if (exempt) {
           kept.push(e)
           continue
@@ -1267,6 +1265,8 @@ export class AdvisoryBus {
     this.liftProbation.clear()
     this.ledgerLiftMuted = 0
     this.efficacySilenced.clear()
+    this.efficacyMuteRemaining.clear()
+    this.efficacyProbation.clear()
     this.efficacyCooldownRemaining.clear()
     this.efficacyCooldownLength.clear()
   }

@@ -29,7 +29,7 @@
   <img src="https://img.shields.io/github/v/release/huiliyi37/Tianshu-harness?color=8B5CF6&label=Release&logo=github&style=for-the-badge" alt="GitHub release">
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
-  <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-19%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
   <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://atomgit.com/huiliyi37/Tianshu-harness"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/star/badge.svg" alt="AtomGit Star"></a>
   <a href="https://github.com/huiliyi37/Tianshu-harness/releases"><img src="https://img.shields.io/github/downloads/huiliyi37/Tianshu-harness/total?logo=github&label=downloads" alt="GitHub downloads"></a>
@@ -48,7 +48,7 @@
 > **天枢**は TypeScript で書かれたコーディングエージェントのランタイムです。**ターミナル TUI** と**デスクトップ GUI** が同一カーネルを共有し、モデルが質問に答えるだけでなく、認知的ガードレール・マルチエージェントオーケストレーション・DeepSeek V4 のプレフィックスキャッシュ向けに設計された低コストの長大セッションを備え、多段階のコーディング作業を継続的に完遂できるようにします。
 
 - **ターミナル × デスクトップ、一つのカーネル** —— 純 ANSI 自前 TUI（`tianshu`）と Tauri デスクトップ（macOS / Windows / Linux）が同一エージェントカーネルを共有。両端で能力は一致し、利用シーンに応じて切り替えられます。
-- **認知仮想マシン（CVM）** —— 5 大フェーズにまたがる 72 のランタイムフックが、モデル出力と実際のアクションの間に観測可能で修正可能な認知レイヤーを挟みます（[A/B 実証](docs/CVM运行时对Agent模型的实证影响.md)）。
+- **認知仮想マシン（CVM）** —— 5 大フェーズにまたがる 75 のランタイムフックが、モデル出力と実際のアクションの間に観測可能で修正可能な認知レイヤーを挟みます（[A/B 実証](docs/CVM运行时对Agent模型的实证影响.md)）。
 - **マルチエージェントオーケストレーション** —— 軽量な `/scout` 読み取り専用偵察、並行 `/team` 施工から、`/council` の複数席会診、`/galaxy` の多次元攻略まで。複雑なタスクは波（wave）単位で実行し、波ごとに検収します。
 - **統一プロジェクトメモリ** —— プロジェクト知識は `.rivet/knowledge/memory.jsonl` に書き込まれます。自動注入はガバナンス／制約系メモリに限定され、過去の問題やドキュメントは明示的な recall 経由のみ——新しいタスクを乗っ取りません。
 - **プレフィックスキャッシュ最優先** —— フリーズしたプレフィックス＋インクリメンタル appendix＋境界圧縮により、DeepSeek V4 の長大セッションで実測の定常ヒット率 **95–99%** を維持し、token コストを大幅に削減します。
@@ -116,7 +116,7 @@ CVM はモデルを「より賢く」するのではなく、4 層の防御深�
 Layer 1: 信念憲法（static prompt）      → 「疑問を持ち、検証し、拒否せよ」          [A/B 検証済み]
 Layer 2: Courage Hook（preTurn）        → 高確信時に独立判断を促す                  [A/B 検証済み]
 Layer 3: Sensorium（毎 turn <1ms）      → 六次元状態感知で戦略切替を駆動            [Wave 7-8 検証済み]
-Layer 4: RuntimeHookPipeline（72 hooks）→ trap-and-emulate で退化行動をインターセプト [全パイプライン稼働中]
+Layer 4: RuntimeHookPipeline（75 hooks）→ trap-and-emulate で退化行動をインターセプト [全パイプライン稼働中]
 ```
 
 ### 独立した認知：星域はロールプレイではない
@@ -135,14 +135,15 @@ Layer 4: RuntimeHookPipeline（72 hooks）→ trap-and-emulate で退化行動�
 
 | 指標 | 数値 |
 |------|------|
-| CLI ソースコード（TypeScript、テスト除く） | 1,078 ファイル / 257,623 行 |
-| テストコード | 1,361 ファイル / 256,001 行 |
-| テストケース（node:test、静的宣言ベース） | **16,471**、テスト : ソース ≈ **0.99 : 1** |
-| 累計コミット | **6,178**（main ブランチ；2026-05-15 リポジトリ作成、105 日） |
+| `src/` ソース（TypeScript、テスト除く） | 約 1,256 ファイル / 30 万行（最大の `agent/` は 483 ファイル） |
+| `src/` テスト | 約 1,592 ファイル / 31 万行（node:test、ソースと約 1:1） |
+| `desktop/src` | 約 450 ファイル / 9.6 万行（React）、別途 Rust 約 1.1 万行 |
+| `vscode-extension/src` | 17 ファイル / 約 2,700 行 |
+| 累計コミット | **8,008**（2026-05-15 作成、約 4.5 か月；直近 30 日で 1,769） |
 | 型チェック | `tsc` strict + `noUncheckedIndexedAccess` |
 | プレフィックスキャッシュヒット率 | 長大セッションの定常実測 95–99% |
 
-コーディングエージェントのコアロジック（マルチターンループ、ツールパイプライン、コンテキスト圧縮）はテスト困難で有名で、オープンソースのエージェントプロジェクトは一般にテストカバレッジが薄いものです——本プロジェクトはテストとソースを同量に保ち、障害修正には必ず回帰テストを付けています。テスト:ソース行数比は長期にわたり 0.93–0.99 を維持し、規模拡大でも薄まっていません（上表は 2026-08-28 実測スナップショット）。完全な統計口径・イテレーションマイルストーン・再現コマンドは [エンジニアリング品質指標](docs/engineering-metrics.md) を参照。
+コーディングエージェントのコアロジック（マルチターンループ、ツールパイプライン、コンテキスト圧縮）はテスト困難で有名で、オープンソースのエージェントプロジェクトは一般にテストカバレッジが薄いものです——本プロジェクトはテストとソースを同量に保ち、障害修正には必ず回帰テストを付けています。テスト:ソース行数比は 1:1 付近を維持し、規模拡大でも薄まっていません（以前の切片は 0.93–0.99；上表は 2026-09-30 の概数スナップショット）。完全な統計口径・イテレーションマイルストーン・再現コマンドは [エンジニアリング品質指標](docs/engineering-metrics.md) を参照。
 
 ## 🚀 クイックスタート
 
@@ -607,6 +608,7 @@ TUI は CLI のデフォルトサーフェスです。デスクトップ版（Ta
 - **sidecar メモリ適応**：ヒープ上限をマシンメモリで自動段階分け（8G→2G / 16G→4G / 32G→6G / 64G+→8G、`RIVET_SIDECAR_HEAP_MB` で上書き可）。≤8GB マシンは自動で lean リソースセットを有効化
 - **watchdog 自動復旧**：境界での停滞時に自動で続行。デスクトップ版のタイムラインに復旧イベントを表示（⟳ 自動復旧 / ⏹ クォータ枯渇）
 - **マルチセッション並行**：タブバーで複数セッションを管理。それぞれ独立した cwd＋モデル＋承認モード
+- **WSL 接続ランタイム**（Windows）：ワンクリックで WSL 内で動作するランタイムに接続。セッション・ファイル読み書き・コマンド実行がすべて Linux 側で行われます。切断時は WSL 側プロセスを自動クリーンアップ。両側は独立してアップグレードできます——詳細は [デスクトップユーザーガイド](docs/desktop-guide.md) を参照。
 - **機能パネル**（左サイドバー `⌘1…9` で切替）：Mission Control（マルチセッションコンソール）、Inbox（受信トレイ）、Automations（定期タスク）、Skills / Hooks 管理、Git / GitHub、Changes（変更レビュー）、Delegation（委譲艦隊とチーム波次 DAG）、Cockpit コックピット
 - **Popout 独立ウィンドウ**：単一のセッションスレッドを独立ウィンドウに分離し、マルチディスプレイで並行
 - **JobsDock / TodoDock 常駐ドロワー**：バックグラウンドタスクのドッキングバー（ログ展開 / Kill / ターミナルで開く）、タブ横断の常駐 todo
@@ -918,7 +920,7 @@ Node.js 24 · TypeScript strict（`noUncheckedIndexedAccess`）· T9 ANSI レン
 
 ```bash
 npm run typecheck                                    # 型チェック
-npm test                                             # すべてのテスト（16,000+ ケース）
+npm test                                             # すべてのテスト（19,000+ ケース）
 npm run build                                        # tsup バンドル＋ネイティブ/wasm ペイロード配置
 node dist/cli/entry.js                               # TUI 起動
 node dist/cli/entry.js -p "fix the typo"             # ヘッドレスモード

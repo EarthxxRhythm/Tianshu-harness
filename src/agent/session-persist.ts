@@ -56,6 +56,7 @@ function legacyMessageToOaiMessages(message: Message): OaiMessage[] {
   return [assistant]
 }
 import type { SessionMetadata } from '../context/types.js'
+import type { CompactEvent } from '../context/types.js'
 import type { LedgerSessionMemoryState, SessionMemoryEntry, SessionMemoryState } from '../context/types.js'
 import { appendSessionMemory, buildSessionMemoryBlock, loadSessionMemory } from '../context/session-memory.js'
 import { ContextClaimStore } from '../context/claim-store.js'
@@ -64,7 +65,7 @@ import { assertValidSessionId } from '../validation.js'
 import { appendChecksum, verifyLines } from './checksum.js'
 import { decodeTranscriptText, encodeBatch } from './session-transcript-codec.js'
 import { SessionBatchWriter } from './session-batch-writer.js'
-import { SessionMetadataStore } from './session-metadata.js'
+import { SessionMetadataStore, compactEventKey, mergeCompactEvent } from './session-metadata.js'
 
 /** Re-export for backward compatibility — tests still import projectSlug from here. */
 export { projectSlug } from '../config/paths.js'
@@ -632,6 +633,27 @@ export class SessionPersist {
   updateMetadata(patch: Partial<SessionMetadata>): void {
     this.metaStore.update(patch, this.sessionId)
     this.refreshListCacheEntry()
+  }
+
+  /**
+   * S3 压缩事件持久化：把一次压缩事件并入 meta 的 compactEvents 台账并**同步落盘**。
+   *
+   * - 幂等：按完整事件身份（compactEventKey）判重，重复投递（恢复回种/重试）
+   *   不产生第二条；同一轮的多次合法压缩（createdAt 不同）全部保留。
+   * - 上限：沿用内存账本的容量（MAX_PERSISTED_COMPACT_EVENTS），旧事件滚出。
+   * - 落盘：压缩是低频事件（会话内个位数~几十次），走 metaStore.flush 同步写，
+   *   沿用项目既有 flush 语义——写失败保留 dirty 并抛出，**不伪报成功**；
+   *   flush 前失败的下一次批量 flush 会重试。
+   * - 入参未就绪（无 meta 文件）时 updateMetadata 走合并语义，不丢其它字段。
+   */
+  appendCompactEvent(event: CompactEvent): void {
+    const existing = this.loadMetadata()?.compactEvents ?? []
+    // 判重看身份是否已存在，**不看长度**——台账满员时新事件会挤出旧事件，
+    // 长度不变但内容已变（用长度判重会静默丢掉满员后的每一次压缩）。
+    if (existing.some(e => compactEventKey(e) === compactEventKey(event))) return
+    const next = mergeCompactEvent(existing, event)
+    this.updateMetadata({ compactEvents: next })
+    this.metaStore.flush()
   }
 
   /**

@@ -124,3 +124,9 @@ export {
   type FounderSigil,
   type FoundingTier,
 } from '../agent/founding-tiers.js'
+
+export {
+  MAX_TEXT_ATTACHMENT_BYTES, CONTEXT_DOCUMENT_MIME,
+  contextFileKind, contextExtension, contextBasename,
+  decodeContextText, contextDataUrlBytes,
+} from './file-context-policy.js'

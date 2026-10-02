@@ -22,6 +22,9 @@ describe('OAuthAuth', () => {
     const auth = new OAuthAuth({
       clientId: 'test-client',
       tokenEndpoint: 'https://auth.example.com/token',
+      // 关掉官方 CLI 导入源——本测试断言的是「store 为空即未认证」，与机器上
+      // 是否装过官方 Codex CLI 无关（importCliAuth 注入就是为此）。
+      importCliAuth: false,
     }, tmpDir)
     assert.equal(auth.isAuthenticated(), false)
   })
@@ -73,6 +76,7 @@ describe('OAuthAuth', () => {
     const auth = new OAuthAuth({
       clientId: 'test-client',
       tokenEndpoint: 'https://auth.example.com/token',
+      importCliAuth: false,
     }, tmpDir)
     await assert.rejects(
       () => auth.getHeaders(),

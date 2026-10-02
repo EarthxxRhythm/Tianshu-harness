@@ -22,6 +22,7 @@
 import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, open, readFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isGoalRolloverState, SAFE_ROLLOVER_ID, type GoalRolloverState } from './goal-rollover-state.js'
 
 /**
  * 工具恢复状态。判据只有一个：`resultRef` 是否存在（= onToolResult 触发过、
@@ -138,6 +139,29 @@ export class RecoveryJournal {
   constructor(private root: string) {}
 
   dir(sessionId: string): string { return join(this.root, sessionId) }
+
+  /** Separate from a run checkpoint: writing the handoff starts another run. */
+  async saveGoalRollover(state: GoalRolloverState): Promise<void> {
+    if (!SAFE_ROLLOVER_ID.test(state.from) || !isGoalRolloverState(state, state.from)) throw new Error('Invalid goal rollover checkpoint')
+    await this.serialize(state.from, async () => {
+      const dir = this.dir(state.from)
+      await mkdir(dir, { recursive: true })
+      const path = join(dir, 'goal-rollover.json')
+      const temporary = `${path}.${randomUUID()}.tmp`
+      const file = await open(temporary, 'wx', 0o600)
+      try { await file.writeFile(JSON.stringify(state)); await file.sync() }
+      finally { await file.close() }
+      await rename(temporary, path)
+    })
+  }
+
+  async loadGoalRollover(id: string): Promise<GoalRolloverState | undefined> {
+    if (!SAFE_ROLLOVER_ID.test(id)) return undefined
+    try {
+      const value: unknown = JSON.parse(await readFile(join(this.dir(id), 'goal-rollover.json'), 'utf8'))
+      return isGoalRolloverState(value, id) ? value : undefined
+    } catch { return undefined }
+  }
 
   async beginRun(input: BeginRunInput): Promise<RecoveryCheckpoint> {
     return this.serialize(input.sessionId, async () => {

@@ -98,6 +98,7 @@ import { rivetHome } from '../config/paths.js'
 import { isKeylessProviderEntry } from '../config/provider-presets.js'
 import type { ProviderRetryConfig } from '../config/retry-schema.js'
 import { allPresetKeys, resolvePreset, resolvePresetBaseUrl, resolvePresetDefaultModel, resolvePresetLabel, resolvePresetProtocol } from '../api/pro-registry.js'
+import { buildOAuthRoutes, oauthListFields } from './config-routes-oauth.js'
 import { modelConfigSchema, providerCapabilitiesSchema, PROVIDER_PROTOCOL_VALUES, type ModelConfig, type ProviderCapabilitiesConfig, type ProviderProtocol } from '../config/schema.js'
 import { queryDeepSeekBalance, type BalanceResult } from '../api/balance-client.js'
 import { discoverVisionModels, validateVisionModel } from '../api/vision-model-onboarding.js'
@@ -265,6 +266,11 @@ export interface ProviderListItem {
   protocol: ProviderProtocol
   isDefault: boolean
   keyStatus: { source: 'inline' | 'env' | 'none'; ref: string }
+  /** OAuth 型 provider（codex 订阅制）：存在即 'oauth'。此时 keyStatus 恒 none
+   *  （没有 API key 这个概念），UI 应看 oauthAuthenticated 而不是 keyStatus。 */
+  authType?: 'oauth'
+  /** OAuth 型 provider 的登录态（token store 可读即 true）。非 oauth 不下发。 */
+  oauthAuthenticated?: boolean
   /** 无需 API key 的端点：keyless 预设（ollama），或未配任何密钥材料的自定义
    *  provider（桌面表单 API Key 可选，用户有意空着 = keyless 端点）。
    *  模型选择器据此区分「keyless」与「该配 key 而没配」——前者照常列出。 */
@@ -311,6 +317,9 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
   }
   return {
     ...buildWorkspaceRoutes(apiToken),
+    // OAuth 型 provider（codex）的登录/登出路由按接缝外提（config-routes-oauth.ts），
+    // 与 config-routes-keys.ts / config-routes-zen.ts 同先例。
+    ...buildOAuthRoutes(apiToken, notifyProviderConfigChanged),
     'GET /config/providers': withAuth(() => {
       const cfg = loadConfig()
       const defaultName = cfg.provider.default
@@ -328,6 +337,10 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           protocol: p.protocol,
           isDefault: name === defaultName,
           keyStatus: getApiKeyStatus(name),
+          // OAuth 型 provider（codex）：keyStatus 恒 none，登录态单独下发（authType/
+          // oauthAuthenticated 由 config-routes-oauth.ts 组装）——与 serve.ts
+          // providerHasUsableAuth 同一条判定链。
+          ...oauthListFields(p),
           // keyless 判定走 provider-presets 单一事实源（预设 keyless 或自定义无密钥材料）——
           // keyStatus 恒 none 的 keyless 端点靠本标记与「该配没配」区分。
           keyless: isKeylessProviderEntry(name, p),

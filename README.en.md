@@ -25,7 +25,7 @@
   <img src="https://img.shields.io/github/v/release/huiliyi37/Tianshu-harness?color=8B5CF6&label=Release&logo=github&style=for-the-badge" alt="GitHub release">
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
-  <img src="https://img.shields.io/badge/Tests-16%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
+  <img src="https://img.shields.io/badge/Tests-19%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
   <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://atomgit.com/huiliyi37/Tianshu-harness"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/star/badge.svg" alt="AtomGit Star"></a>
   <a href="https://github.com/huiliyi37/Tianshu-harness/releases"><img src="https://img.shields.io/github/downloads/huiliyi37/Tianshu-harness/total?logo=github&label=downloads" alt="GitHub downloads"></a>
@@ -44,7 +44,7 @@
 > **Tianshu** is a TypeScript coding-agent runtime: one agent kernel shared by a **terminal TUI** and a **desktop GUI**. It is built to let models do continuous multi-step engineering work — with cognitive guardrails, multi-agent orchestration, and a DeepSeek V4 prefix-cache-friendly design for cost-efficient long sessions.
 
 - **One kernel, two surfaces** — a pure-ANSI terminal TUI (`tianshu`) and a Tauri desktop app (macOS / Windows / Linux) share the same agent core, so capabilities stay consistent across interfaces.
-- **Cognitive Virtual Machine (CVM)** — 72 runtime hooks across 5 lifecycle phases put an observable, correctable cognitive layer between model output and real tool actions ([A/B evidence](docs/CVM运行时对Agent模型的实证影响.md)).
+- **Cognitive Virtual Machine (CVM)** — 75 runtime hooks across 5 lifecycle phases put an observable, correctable cognitive layer between model output and real tool actions ([A/B evidence](docs/CVM运行时对Agent模型的实证影响.md)).
 - **Multi-agent orchestration** — from lightweight `/scout` reconnaissance and parallel `/team` execution to `/council` multi-model review and `/galaxy` multi-dimensional attack, complex work runs in waves with review gates.
 - **Unified project memory** — project knowledge lives in `.rivet/knowledge/memory.jsonl`; automatic injection is limited to governance/constraint/preference memories, while old failures and docs stay explicit-recall-only so they cannot hijack new questions.
 - **Prefix-cache first** — frozen prefix + incremental appendix + boundary compaction sustain a measured steady-state **95–99% prefix-cache hit rate** on DeepSeek V4.
@@ -113,7 +113,7 @@ CVM doesn't make the model "smarter"; it adds four layers of defense in depth:
 Layer 1: Belief constitution (static prompt)  → "you should question, verify, refuse"   [A/B proven]
 Layer 2: Courage Hook (preTurn)               → encourage independent judgment          [A/B proven]
 Layer 3: Sensorium (per turn, <1ms)           → 6-dim state sensing drives strategy      [Wave 7-8 proven]
-Layer 4: RuntimeHookPipeline (72 hooks)       → trap-and-emulate regressed behaviors     [always on]
+Layer 4: RuntimeHookPipeline (75 hooks)       → trap-and-emulate regressed behaviors     [always on]
 ```
 
 ### Independent cognition: star domains are not role-play
@@ -132,14 +132,15 @@ Once the degradations are intercepted layer by layer, models begin to express th
 
 | Metric | Value |
 |--------|-------|
-| CLI source (TypeScript, excl. tests) | 1,078 files / 257,623 lines |
-| Test code | 1,361 files / 256,001 lines |
-| Test cases (node:test, static declarations) | **16,471**, test : source ≈ **0.99 : 1** |
-| Total commits | **6,178** on main (repo created 2026-05-15, 105 days in) |
+| `src/` source (TypeScript, excl. tests) | ~1,256 files / ~300k lines (`agent/` alone is 483 files) |
+| `src/` tests | ~1,592 files / ~310k lines (node:test, ~1:1 with source) |
+| `desktop/src` | ~450 files / ~96k lines (React), plus ~11k lines of Rust |
+| `vscode-extension/src` | 17 files / ~2,700 lines |
+| Commits | **8,008** total (created 2026-05-15, ~4.5 months; 1,769 in the last 30 days) |
 | Type checking | `tsc` strict + `noUncheckedIndexedAccess` |
 | Prefix-cache hit rate | 95–99% steady state, measured on long sessions |
 
-Agent core logic (multi-turn loops, tool pipelines, context compaction) is notoriously hard to test, and most open-source agents ship with thin coverage. This project maintains a near 1:1 test-to-source ratio, and every incident fix ships with a regression test — the ratio has held between 0.93:1 and 0.99:1 as the codebase grew (the table above is a measured snapshot as of 2026-08-28). Full methodology, growth milestones, and reproduction commands: [Engineering Metrics](docs/engineering-metrics.md).
+Agent core logic (multi-turn loops, tool pipelines, context compaction) is notoriously hard to test, and most open-source agents ship with thin coverage. This project keeps tests roughly equal to source, and every incident fix ships with a regression test — the ratio has stayed near 1:1 as the codebase grew (earlier slices sat between 0.93:1 and 0.99:1; this table is a rounded snapshot as of 2026-09-30). Full methodology, growth milestones, and reproduction commands: [Engineering Metrics](docs/engineering-metrics.md).
 
 ### Tianshu vs. MiMo-Code vs. Claude Code
 
@@ -148,7 +149,7 @@ Agent core logic (multi-turn loops, tool pipelines, context compaction) is notor
 | Dimension | Tianshu | MiMo-Code | Claude Code |
 | :--- | :--- | :--- | :--- |
 | **Core focus** | Cognitive runtime (CVM) | Product experience / ecosystem | Enterprise coding agent |
-| **Runtime hook layer** | 72 conditionally-assembled hook modules × 5 phases | standard agent loop | user-configurable hooks |
+| **Runtime hook layer** | 75 conditionally-assembled hook modules × 5 phases | standard agent loop | user-configurable hooks |
 | **Prefix-cache tuning** | Deeply tuned for DeepSeek V4 (95–99% steady-state) | provider default | Anthropic prompt caching |
 | **Self-perception** | Continuous cognitive-state vector | — | — |
 | **Cross-session memory** | Unified project memory + adaptive recall + session-scoped pheromones | SQLite + MEMORY.md | project memory |
@@ -592,6 +593,7 @@ The desktop app builds a visual interaction layer on top of the TUI's full capab
 - **Adaptive sidecar memory** — heap cap auto-tiers by machine RAM (8G→2G / 16G→4G / 32G→6G / 64G+→8G; override via `RIVET_SIDECAR_HEAP_MB`); machines with ≤8GB auto-enable the lean resource tier.
 - **Watchdog auto-recovery** — auto-continues on boundary stalls; the desktop timeline shows recovery events (⟳ auto-recover / ⏹ quota exhausted).
 - **Multi-session concurrency** — a tab bar manages multiple sessions, each with its own cwd + model + approval mode.
+- **WSL connected runtime** (Windows) — one click to connect to the runtime running inside WSL; sessions, file access and command execution all happen on the Linux side. Disconnecting cleans up the WSL-side process automatically. The two sides upgrade independently — see the [Desktop User Guide](docs/desktop-guide.md).
 - **Feature panels** (left rail `⌘1…9` to switch): Mission Control (multi-session console), Inbox, Automations (scheduled tasks), Skills / Hooks management, Git / GitHub, Changes (diff review), Delegation (fleet tree & team-wave DAG), Cockpit.
 - **Popout window** — pop a single conversation thread into its own window for multi-screen parallel work.
 - **JobsDock / TodoDock** — a persistent background-task dock (expand logs / kill / open in terminal) and a cross-tab persistent todo dock.
@@ -855,7 +857,7 @@ Node.js 24 · TypeScript strict (`noUncheckedIndexedAccess`) · T9 ANSI renderin
 
 ```bash
 npm run typecheck                                    # typecheck
-npm test                                             # all tests (16,000+ cases)
+npm test                                             # all tests (19,000+ cases)
 npm run build                                        # tsup bundle + staged native/wasm payload
 node dist/cli/entry.js                               # launch TUI
 node dist/cli/entry.js -p "fix the typo"             # headless mode

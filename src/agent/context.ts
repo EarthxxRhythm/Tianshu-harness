@@ -185,6 +185,16 @@ export class SessionContext {
    * 上限防止长会话无界增长。
    */
   private toolNamesById = new Map<string, string>()
+  /** issue #247 补充项：本会话 CVM 拦截累计（口径/rationale 见 getCvmInterceptions）。 */
+  private cvmInterceptions = { total: 0, byKind: {} as Record<string, number> }
+  /** S1 效率时间尺度：**主轮**输出累计（不含 addSidePathUsage 的侧路成本）。
+   *  只被效率信号的时间窗口观测器消费；不与 totalUsage 同源消费（口径见
+   *  addUsage / getMainPathOutputTokens）。 */
+  private mainOutputTokens = 0
+  /** S3 压缩事件持久化：内存账本的唯一外流口。由装配方（AgentLoop）在
+   *  persist 就绪后绑定；未绑定（测试/无 sessionId 的裸会话）时行为与旧版
+   *  一致——只写内存。 */
+  private compactEventSink: ((event: CompactEvent) => void) | null = null
 
   constructor() {
     this.state = {
@@ -540,7 +550,13 @@ export class SessionContext {
         }
       }
     }
-    if (usage.output_tokens) u.output_tokens += usage.output_tokens
+    if (usage.output_tokens) {
+      u.output_tokens += usage.output_tokens
+      // S1 效率时间尺度：主轮输出单独记账。totalUsage.output_tokens 混入了侧路
+      // 请求（spec 预测 / 压缩总结，见 addSidePathUsage）——把它当"模型本轮为
+      // 这些工具花了多少输出"会把侧路成本算进效率信号。此处只累计主轮。
+      this.mainOutputTokens += usage.output_tokens
+    }
     if (usage.cache_read_input_tokens) u.cache_read_input_tokens += usage.cache_read_input_tokens
     if (usage.cache_creation_input_tokens) u.cache_creation_input_tokens += usage.cache_creation_input_tokens
     if (usage.reasoning_tokens) u.reasoning_tokens = (u.reasoning_tokens ?? 0) + usage.reasoning_tokens
@@ -606,6 +622,17 @@ export class SessionContext {
 
   getTotalUsage(): Usage {
     return { ...this.state.totalUsage, ...(this.hasUsageObservation ? { cacheCoverage: { ...this.cacheCoverage } } : {}) }
+  }
+
+  /**
+   * S1 效率时间尺度：主轮输出累计。
+   *
+   * 与 getTotalUsage().output_tokens 的差异只有一处——不含侧路请求
+   * （spec 预测 / 压缩总结）。效率信号问的是"模型为这些工具花了多少输出"，
+   * 侧路成本与工具进度无关，混进来会把健康会话压成停滞。
+   */
+  getMainPathOutputTokens(): number {
+    return this.mainOutputTokens
   }
 
   getEstimatedTokens(): number {
@@ -713,6 +740,23 @@ export class SessionContext {
     }
   }
 
+  /**
+   * 记一次 CVM 拦截。调用点唯一：turn-step-producer 的 CVM-vector 路由。
+   * 口径 = evaluator 产出 classification 的次数，含 gate-blocked 这类只落
+   * 台账、永不发声的分类（issue 抱怨「拦了看不见」的主体）；shadow 下同样
+   * 累加——shadow 是「不发声」不是「不记录」。
+   * 挂 Session 而非 AgentLoop：/model 切换会重建 AgentLoop，挂那边会被清零。
+   */
+  recordCvmInterception(kind: string): void {
+    this.cvmInterceptions.total += 1
+    this.cvmInterceptions.byKind[kind] = (this.cvmInterceptions.byKind[kind] ?? 0) + 1
+  }
+
+  /** 本会话 CVM 拦截累计快照（total 供 GlanceBar；byKind 供分布视图）。 */
+  getCvmInterceptions(): { total: number; byKind: Record<string, number> } {
+    return { total: this.cvmInterceptions.total, byKind: { ...this.cvmInterceptions.byKind } }
+  }
+
   markCompacted(turn: number): void {
     this.state.compactedAtTurns.add(turn)
   }
@@ -737,11 +781,27 @@ export class SessionContext {
     return this.state.contextLedger
   }
 
+  /**
+   * S3 压缩事件持久化绑定：装配方（AgentLoop）在 SessionPersist 就绪后注入
+   * 落盘实现。**单一入口**——自动压缩 / 手动 /compact / rewind / TUI /
+   * headless / server / worker 全部经 recordCompactEvent 走到这里，绑定一处
+   * 即全覆盖。
+   *
+   * 失败语义：绑定实现内部沿用项目既有的 meta 写入/flush 语义（写失败保留
+   * dirty 并在 flush 抛出），不在此处 try/catch 吞掉——压缩台账丢了要看得见。
+   */
+  setCompactEventSink(sink: (event: CompactEvent) => void): void {
+    this.compactEventSink = sink
+  }
+
   recordCompactEvent(event: CompactEvent): void {
     this.state.compactEvents = [...this.state.compactEvents, event]
     if (this.state.compactEvents.length > MAX_CACHE_HISTORY) {
       this.state.compactEvents = this.state.compactEvents.slice(-MAX_CACHE_HISTORY)
     }
+    // 内存账本已更新后再外流：持久化失败不回滚内存（本轮压缩确实发生了），
+    // 由 flush 语义负责重试与告警。
+    this.compactEventSink?.(event)
   }
 
   getCompactEvents(): CompactEvent[] {

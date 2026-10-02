@@ -106,6 +106,27 @@ function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
+/**
+ * 计费行判据（**单一事实源**）：主请求行（event 缺省）、side_path 与 retry
+ * （stream_attempt_aborted）都是 provider 实际计费的调用。
+ * 对账类消费者（scripts/audit-usage-ledgers.ts 等）必须导入本函数，不要自写
+ * 过滤——2026-10-02 审计脚本曾自称"同口径"却漏掉 retry 行，把计入 retry 的
+ * meta 误判为 overcount（第三批修复）。
+ */
+export function isBilledCacheLogEvent(event: unknown): boolean {
+  return event === undefined || event === 'side_path' || event === 'stream_attempt_aborted'
+}
+
+/**
+ * 尝试级去重键（provider × model × requestId × attemptId）：同一 attempt 的
+ * 重复落行只计一次。requestId/attemptId 缺失时返回 undefined（不去重）。
+ * parseUsageRows 与 audit-usage-ledgers 共用，防止口径再次漂移。
+ */
+export function attemptDedupeKey(record: Record<string, unknown>): string | undefined {
+  if (typeof record.requestId !== 'string' || typeof record.attemptId !== 'string') return undefined
+  return JSON.stringify([record.provider, record.model, record.requestId, record.attemptId])
+}
+
 /** Parse cache-log JSONL content into usage rows. Non-usage event rows and malformed lines are dropped. */
 export function parseUsageRows(content: string): CacheUsageRow[] {
   const attempts = new Set<string>()
@@ -119,13 +140,13 @@ export function parseUsageRows(content: string): CacheUsageRow[] {
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
     const record = parsed as Record<string, unknown>
-    if (typeof record.requestId === 'string' && typeof record.attemptId === 'string') {
-      const key = JSON.stringify([record.provider, record.model, record.requestId, record.attemptId])
-      if (attempts.has(key)) return []
-      attempts.add(key)
+    const dedupeKey = attemptDedupeKey(record)
+    if (dedupeKey !== undefined) {
+      if (attempts.has(dedupeKey)) return []
+      attempts.add(dedupeKey)
     }
     const event = record.event
-    if (event !== undefined && event !== 'side_path' && event !== 'stream_attempt_aborted') return []
+    if (!isBilledCacheLogEvent(event)) return []
     const t = num(record.t)
     const input = num(record.input)
     if (t === undefined || input === undefined) return []

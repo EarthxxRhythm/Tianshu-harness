@@ -364,6 +364,65 @@ describe('CodexClient', () => {
   })
 })
 
+describe('CodexClient usage 缓存映射', () => {
+  it('response.completed 的 input_tokens_details 映射到 cache_read/cache_creation（此前恒 0 是映射缺口）', async () => {
+    const client = new CodexClient({
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      model: 'gpt-6.1-sol',
+      maxTokens: 64000,
+    })
+
+    const sseData = [
+      'data: {"type":"response.created","response":{"id":"resp_1"}}',
+      'data: {"type":"response.output_text.delta","delta":"好"}',
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":5504,"output_tokens":10,"input_tokens_details":{"cached_tokens":4800,"cache_write_tokens":704},"output_tokens_details":{"reasoning_tokens":3}}}}',
+    ].join('\n') + '\n'
+
+    let usage: Record<string, unknown> | undefined
+    await (client as any).processSSEStream({ body: new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode(sseData))
+        controller.close()
+      },
+    }) }, {
+      onTextDelta: () => {},
+      onThinkingDelta: () => {},
+      onContentBlock: () => {},
+      onStopReason: (_r: string, u: Record<string, unknown>) => { usage = u },
+      onError: (e: Error) => { throw e },
+    })
+
+    assert.ok(usage, '应有 usage')
+    assert.equal(usage!.cache_read_input_tokens, 4800, 'cached_tokens → cache_read')
+    assert.equal(usage!.cache_creation_input_tokens, 704, 'cache_write_tokens → cache_creation')
+    assert.equal(usage!.input_tokens, 5504, 'input_tokens 原样')
+  })
+
+  it('input_tokens_details 缺席时回落 0（与旧行为一致）', async () => {
+    const client = new CodexClient({
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      model: 'gpt-6.1-sol',
+      maxTokens: 64000,
+    })
+    const sseData = 'data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5}}}\n'
+    let usage: Record<string, unknown> | undefined
+    await (client as any).processSSEStream({ body: new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode(sseData))
+        controller.close()
+      },
+    }) }, {
+      onTextDelta: () => {},
+      onThinkingDelta: () => {},
+      onContentBlock: () => {},
+      onStopReason: (_r: string, u: Record<string, unknown>) => { usage = u },
+      onError: (e: Error) => { throw e },
+    })
+    assert.equal(usage!.cache_read_input_tokens, 0)
+    assert.equal(usage!.cache_creation_input_tokens, 0)
+  })
+})
+
 describe('Retry-After header extraction on 429', () => {
   it('attaches retryAfterMs to error from response Retry-After header', () => {
     const retryAfterValue = '10'

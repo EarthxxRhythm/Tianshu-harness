@@ -13,10 +13,18 @@ import { registerLauncherView } from './views/launcher-view.js'
 import { DelegationExecutor } from './delegation/executor.js'
 import { StatusBarController } from './views/status-bar.js'
 import { registerCommitMessageCommand } from './scm/commit-message.js'
+import { TianshuSourceControl } from './scm/source-control.js'
 import { ensureRuntime, rivetOnPath } from './sidecar/runtime-downloader.js'
+import { TianshuChatParticipant } from './chat/participant.js'
+import { ChatHumanInteraction } from './chat/human-interaction.js'
+import { estimateTokens, mapProviderModels, tianshuModelInfo, TIANSHU_VENDOR, UNAVAILABLE_NOTE } from './chat/model-provider.js'
 
 let sidecar: SidecarHandle | undefined
 let clientPromise: Promise<SidecarClient> | undefined
+/** sidecar 就绪后的客户端（模型目录的数据源；不触发启动，dispose 时清空）。 */
+let liveClient: SidecarClient | undefined
+/** 模型目录变化通道：sidecar 就绪/重启后 fire，chat 重新拉取模型列表。 */
+let modelInfoChannel: vscode.EventEmitter<void> | undefined
 let output: vscode.OutputChannel | undefined
 let delegation: DelegationExecutor | undefined
 let statusBar: StatusBarController | undefined
@@ -47,7 +55,16 @@ export function activate(context: vscode.ExtensionContext): void {
     cwd ?? '',
   )
 
-  const changesTree = registerChangesView(context, () => ensureClient(provider, cwd), cwd ?? '')
+  // 会话变更双面呈现（L2-5）：Explorer 树 + 原生 SCM 资源，两者并存。
+  // SCM 先建：刷新/回滚命令（注册在 changes-view）经 onRefresh 同时刷新 SCM 面。
+  const scmChanges = new TianshuSourceControl(() => ensureClient(provider, cwd), cwd ?? '')
+  context.subscriptions.push(scmChanges)
+  const changesTree = registerChangesView(
+    context,
+    () => ensureClient(provider, cwd),
+    cwd ?? '',
+    () => void scmChanges.refresh(),
+  )
   registerLauncherView(context)
   delegation = new DelegationExecutor(() => ensureClient(provider, cwd), cwd ?? '')
   delegation.register(context)
@@ -55,12 +72,59 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(statusBar)
   registerCommitMessageCommand(context)
 
+  // Chat 接入：默认 participant（不带 @ 直接路由）+ BYOK 模型注册——
+  // 「聊天框里说话的是天枢」，而不是 Copilot 登录死路。审批/提问走原生对话框。
+  const chatHuman = new ChatHumanInteraction(
+    () => ensureClient(provider, cwd),
+    (line) => output?.appendLine(line),
+  )
+  context.subscriptions.push(chatHuman)
+  const chatParticipant = new TianshuChatParticipant(
+    () => ensureClient(provider, cwd),
+    (line) => output?.appendLine(line),
+    chatHuman,
+  )
+  context.subscriptions.push(chatParticipant)
+  // 模型目录通道：sidecar 就绪/重启后 fire，chat 重新拉取模型列表（见 ensureClient）。
+  modelInfoChannel = new vscode.EventEmitter<void>()
+  context.subscriptions.push(modelInfoChannel)
+  context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(TIANSHU_VENDOR, {
+    onDidChangeLanguageModelChatInformation: modelInfoChannel.event,
+    // 真实目录：内核 provider 的模型（deepseek-v4-pro 等）；未就绪/无配置时保底占位。
+    // 刻意用 liveClient 而非 ensureClient——查询模型列表不应触发内核启动。
+    provideLanguageModelChatInformation: async () => {
+      if (!liveClient) return [tianshuModelInfo()]
+      try {
+        const catalog = await liveClient.listProviders()
+        const mapped = mapProviderModels(catalog)
+        return mapped.length > 0 ? mapped : [tianshuModelInfo()]
+      } catch {
+        return [tianshuModelInfo()]
+      }
+    },
+    provideLanguageModelChatResponse: (_model, _messages, _options, progress) => {
+      // 故意不推理：真正的入口是 participant（见 chat/model-provider.ts）。
+      progress.report(new vscode.LanguageModelTextPart(UNAVAILABLE_NOTE))
+      return Promise.resolve()
+    },
+    provideTokenCount: (_model, input) => Promise.resolve(estimateTokens(
+      typeof input === 'string'
+        ? input
+        : input.content.map((part) => {
+          const value: unknown = (part as { value?: unknown }).value
+          return typeof value === 'string' ? value : ''
+        }).join(''),
+    )),
+  }))
+
   provider.onSessionActivity = (kind, sessionId) => {
     if (kind === 'attach') {
       changesTree.setSession(sessionId)
+      scmChanges.setSession(sessionId)
       void delegation?.attachSession(sessionId)
     } else {
       changesTree.scheduleRefresh()
+      scmChanges.scheduleRefresh()
     }
   }
 
@@ -202,7 +266,9 @@ async function ensureClient(provider: CockpitProvider, cwd: string | undefined):
       })
       provider.notifySidecarState('ready')
       statusBar?.setSidecarState('ready')
-      return new SidecarClient(sidecar.baseUrl, sidecar.token)
+      liveClient = new SidecarClient(sidecar.baseUrl, sidecar.token)
+      modelInfoChannel?.fire()
+      return liveClient
     })()
   }
   return clientPromise
@@ -219,6 +285,7 @@ function disposeSidecar(): void {
   sidecar?.dispose()
   sidecar = undefined
   clientPromise = undefined
+  liveClient = undefined
 }
 
 export function deactivate(): void {

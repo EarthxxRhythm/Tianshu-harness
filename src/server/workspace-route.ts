@@ -13,6 +13,7 @@ import { isAuthorizedRequest } from './auth.js'
 import { rivetHome } from '../config/paths.js'
 import { getWorkspaceConfig, setWorkspaceConfig } from '../config/workspace-config.js'
 import { sessionScratchRoot } from './workspace.js'
+import { buildFileContextRoutes } from './file-context-routes.js'
 
 function withAuth(handler: RouteHandler, apiToken?: string): RouteHandler {
   return async (body, params, headers, res) => {
@@ -31,6 +32,7 @@ function workspaceSnapshot(): { defaultDir: string | null; scratchDir: string | 
 
 export function buildWorkspaceRoutes(apiToken?: string): Record<string, RouteHandler> {
   return {
+    ...buildFileContextRoutes(apiToken),
     'GET /config/workspace': withAuth(() => {
       return { status: 200, body: workspaceSnapshot() }
     }, apiToken),

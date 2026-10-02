@@ -9,7 +9,43 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { writeFileAtomicSync } from '../fs-atomic.js'
-import type { SessionMetadata } from '../context/types.js'
+import type { CompactEvent, SessionMetadata } from '../context/types.js'
+
+/**
+ * 持久化压缩台账的容量上限——与内存账本 SessionContext 的 MAX_CACHE_HISTORY
+ * 同值（保留既有上限；两处刻意各自持有常量，避免 agent 层与 context 层的
+ * 循环依赖）。
+ */
+export const MAX_PERSISTED_COMPACT_EVENTS = 500
+
+/**
+ * 压缩事件的**完整身份**（幂等键）。
+ *
+ * 只用 turn+tier 会把同一轮的合法多次压缩合并掉（tier 1 微压缩后紧跟 tier 2
+ * 自动压缩是正常形态）；createdAt 是每次记录时刻，重复投递同一事件才命中。
+ */
+export function compactEventKey(event: CompactEvent): string {
+  return [
+    event.turn,
+    event.tier,
+    event.createdAt,
+    event.beforeTokens,
+    event.afterTokens,
+    event.reason,
+  ].join('\u0000')
+}
+
+/**
+ * 幂等追加并保留上限：完整身份已存在 → 原样返回（不追加、不更新 updatedAt）。
+ */
+export function mergeCompactEvent(existing: readonly CompactEvent[], event: CompactEvent): CompactEvent[] {
+  const key = compactEventKey(event)
+  if (existing.some(e => compactEventKey(e) === key)) return [...existing]
+  const next = [...existing, event]
+  return next.length > MAX_PERSISTED_COMPACT_EVENTS
+    ? next.slice(-MAX_PERSISTED_COMPACT_EVENTS)
+    : next
+}
 
 export class SessionMetadataStore {
   /** In-memory cache: null = not loaded, undefined = no file on disk. */

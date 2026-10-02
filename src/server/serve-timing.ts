@@ -44,6 +44,18 @@ export function formatServeTimingPhase(phase: string, elapsedMs: number, extra?:
   return `${SERVE_TIMING_PREFIX} phase=${phase} +${Math.round(elapsedMs)}ms${extra ? ` ${extra}` : ''}`
 }
 
+/**
+ * `start` 行的附加字段。各阶段的 `+ms` 都从 runServe 起算，看不到进程启动到 runServe 之间
+ * 的那段（Node 自身引导 + 加载 serve 模块图）：`uptime` 是这一整段，`bootstrap` 是其中 Node
+ * 自身引导的部分（`performance.nodeTiming.bootstrapComplete`，取不到时省略）。
+ */
+export function formatServeStartExtra(pid: number, uptimeMs: number, bootstrapMs?: number): string {
+  const bootstrap = typeof bootstrapMs === 'number' && Number.isFinite(bootstrapMs)
+    ? ` bootstrap=${Math.round(bootstrapMs)}ms`
+    : ''
+  return `pid=${pid} uptime=${Math.round(uptimeMs)}ms${bootstrap}`
+}
+
 export interface ServeTimingLogger {
   readonly enabled: boolean
   /** 打一行阶段标记；关闭时零开销（不求值 extra 之外的东西）。 */

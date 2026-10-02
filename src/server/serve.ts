@@ -20,6 +20,7 @@ import { resolveExecutionBackend } from './execution-backend.js'
 import { buildSessionRoutes } from './session-routes.js'
 import { buildMissionRoutes } from './mission-routes.js'
 import { buildRemoteInfoRoutes } from './remote-info-routes.js'
+import { installParentWatchdog } from './parent-watchdog.js'
 import { MissionStore } from './mission-store.js'
 import { buildHealthRoute, createHealthSnapshot, RUNTIME_INSTANCE_ID } from './health-route.js'
 import { buildAccountRoutesFor } from './account-routes.js'
@@ -35,6 +36,7 @@ import { buildTaskRoutes } from './task-routes.js'
 import { buildConfigRoutes } from './config-routes.js'
 import { buildEnvRoute } from './env-route.js'
 import { buildBrowserRoutes } from './browser-routes.js'
+import { buildClipboardRoutes } from './clipboard-routes.js'
 import { buildProjectTemplatesRoutes } from './project-templates-routes.js'
 import { registeredWorkspaces } from './workspace-guard.js'
 import { buildProjectDocsRoutes } from './project-docs-routes.js'
@@ -43,6 +45,10 @@ import { buildCacheRoutes } from './cache-routes.js'
 import { buildSpeechRoutes, createSpeechEngineFromEnv, type SpeechEngine } from './speech-routes.js'
 import { existsSync } from 'node:fs'
 import { CronScheduler, setActiveScheduler, setScheduleWriteGuard, setUnattendedAutomationGate } from './cron-scheduler.js'
+export { installParentWatchdog, probeParentAlive, maxMissesFromGraceEnv, type ParentWatchdogOptions } from './parent-watchdog.js'
+import { writeServerInfo, clearServerInfo, enableJsonModeStdoutPurity, attachOrExit, printSpawnedHandshake, type ServerInfo } from './server-info.js'
+import { parseHostsAllow } from './host-policy.js'
+import { setShutdownHandler } from './shutdown-registry.js'
 import { CronWiring } from './cron-wiring.js'
 import { buildMcpRoutes } from './mcp-api.js'
 import { buildPluginRoutes } from './plugin-api.js'
@@ -50,6 +56,7 @@ import { pluginToolsWarmup, warmPluginToolsCache } from './plugin-session-cache.
 import {
   PLUGIN_WARM_WAIT_CAP_MS,
   createServeTimingLogger,
+  formatServeStartExtra,
   isServeTimingEnabled,
   resolveServeWarmDelayMs,
   scheduleDeferredWarmup,
@@ -66,7 +73,7 @@ import { setTargetConventions, applyConfiguredGitBashPath, prewarmShellProbes } 
 import { prewarmResolvedEnv } from '../tools/resolved-env.js'
 import { isKeylessProviderEntry } from '../config/provider-presets.js'
 import { resolveApiKey, resolveCredentialKey } from '../api/factory.js'
-import { disambiguateKeyPrefix, findModelInKey, findModelOwner, parseModelRef } from '../config/provider-keys.js'
+import { findModelInKey, findModelOwner, resolveModelRef } from '../config/provider-keys.js'
 import { contractModels } from '../config/contract-models.js'
 import type { OaiMessage } from '../api/oai-types.js'
 import { findRecentUnrecordedWrites, formatDiskReconciliationNote, shouldReconcileDisk } from '../context/write-evidence-probe.js'
@@ -83,40 +90,8 @@ import { FileSessionPersistence } from './session-persistence.js'
 import { RunLedger } from './run-ledger.js'
 import { RecoveryJournal } from './recovery-journal.js'
 import type { SharedRuntime } from './serve-agent.js'
-
-type ServeAgentModule = typeof import('./serve-agent.js')
-let serveAgentMod: ServeAgentModule | null = null
-let serveAgentPromise: Promise<ServeAgentModule> | null = null
-
-/** Load heavy agent assembly (deferred from cold /health path). */
-export function loadServeAgent(): Promise<ServeAgentModule> {
-  if (!serveAgentPromise) {
-    const t0 = performance.now()
-    serveAgentPromise = import('./serve-agent.js').then((m) => {
-      serveAgentMod = m
-      if (process.env.RIVET_SERVE_TIMING === '1') {
-        console.error(`[serve-timing] serve-agent import ${Math.round(performance.now() - t0)}ms`)
-      }
-      return m
-    }).catch((err) => {
-      // Don't cache a rejected promise — transient build/load failures would
-      // permanently break session creation otherwise.
-      serveAgentPromise = null
-      throw err
-    })
-  }
-  return serveAgentPromise
-}
-
-/** serve-agent chunk 是否已开始 import（在飞或已完成）——测试观察 listen 后延迟预热用。 */
-export function isServeAgentLoadStarted(): boolean {
-  return serveAgentPromise !== null || serveAgentMod !== null
-}
-
-export function _resetServeAgentForTests(): void {
-  serveAgentMod = null
-  serveAgentPromise = null
-}
+import { getLoadedServeAgentModule, loadServeAgent } from './serve-agent-loader.js'
+export { _resetServeAgentForTests, isServeAgentLoadStarted, loadServeAgent } from './serve-agent-loader.js'
 
 export interface ServeContext {
   config: Config
@@ -234,7 +209,7 @@ export function resolveModelSpec(ctx: ServeContext, modelId: string): ResolvedMo
   // keyId」的判据收成单一事实源。此前 serve 与 main.ts 各写一份，main.ts 那侧漂了
   // 很久（`ollama:qwen3:32b` 被当成 keyId → 模型/凭据双错），两侧注释却都写着「同语义」。
   const { provider: pinnedProvider, keyId: pinnedKeyId, modelRef } =
-    disambiguateKeyPrefix(ctx.config.provider.providers, parseModelRef(modelId))
+    resolveModelRef(ctx.config.provider.providers, modelId)
   if (!modelRef) return null
 
   const entries = pinnedProvider
@@ -333,7 +308,7 @@ export function classifyModelSpecMiss(config: Config, modelId: string): 'unknown
   // 与 resolveModelSpec 同一套消歧义 —— 否则 `provider:keyId:modelId` 与
   // 「模型 id 自带冒号」两种形态的未命中会被误判成 unknown-model。
   const { provider: pinnedProvider, keyId: pinnedKeyId, modelRef } =
-    disambiguateKeyPrefix(config.provider.providers, parseModelRef(modelId))
+    resolveModelRef(config.provider.providers, modelId)
   if (!modelRef) return 'unknown-model'
   const entries = pinnedProvider
     ? (config.provider.providers[pinnedProvider] ? [[pinnedProvider, config.provider.providers[pinnedProvider]] as const] : [])
@@ -683,6 +658,8 @@ export interface RunServeOptions {
 
 export interface RunningServer {
   port: number
+  /** 本实例坐标（内存真源，ephemeral 模式下也始终存在）——--json 握手输出用。 */
+  serverInfo: ServerInfo
   close: (callback?: () => void) => void
   sessions: RuntimeSessionManager
   scheduler?: CronScheduler
@@ -701,7 +678,7 @@ const DEFAULT_PORT = 3100
 export async function runServe(opts: RunServeOptions = {}): Promise<RunningServer> {
   // 启动阶段时间线（默认进 sidecar 日志；RIVET_SERVE_TIMING=0 关，见 serve-timing.ts）。
   const timing = createServeTimingLogger(isServeTimingEnabled(opts))
-  timing.mark('start', `pid=${process.pid}`)
+  timing.mark('start', formatServeStartExtra(process.pid, performance.now(), performance.nodeTiming?.bootstrapComplete))
   // Pro 扩展点加载（spec 3b）：桌面 sidecar 生产路径。必须在 config-routes
   // 首次查询之前完成——否则 spark 节点不可见（合并视图查不到注册项）。
   await loadProModule()
@@ -1047,6 +1024,10 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // `rivet browser install`，缺了这两条路由截图能力对他们就是不可用。
   Object.assign(routes, buildBrowserRoutes(apiToken))
 
+  // Clipboard image route: WebKitGTK 的 paste 事件对纯图片剪贴板透出空数据，
+  // 桌面端 Ctrl+V 取图靠它兜底（复用 TUI 取图链，见 #302）。
+  Object.assign(routes, buildClipboardRoutes(apiToken))
+
   // Project templates route: first-run AGENTS.md / .rivet.md bootstrap for desktop UI.
   // issue #221：project-docs / project-templates / project/trust 的 cwd 只接受已注册工作区。
   Object.assign(routes, buildProjectTemplatesRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions ?? undefined)))
@@ -1265,7 +1246,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   const listenT0 = performance.now()
   const server = await startServer(port, routes, apiToken, { host, allowedHosts, mobileDir })
   timing.mark('listen', `bind=${Math.round(performance.now() - listenT0)}ms wall=${Date.now() - startedAt}ms`)
-  // 宿主探针预热（异步 spawn，不占主线程）：reg query 两个 hive + where git/bash/pwsh。
+  const serverInfo: ServerInfo = { port, host, token: apiToken, pid: process.pid, startedAt: new Date(startedAt).toISOString() }
   // 首批 UI 请求里的 GET /environment 此前是这些探针的首个调用方，同步 spawnSync
   // 卡主线程几百 ms，并发的 /config/* 与 /git/branches 全排在它后面——实测就是
   // 「就绪后首秒所有路由 300–600ms」的主因（agent chunk 预热只是次因）。
@@ -1284,11 +1265,16 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   }, resolveServeWarmDelayMs())
   return {
     port,
+    /** 本实例坐标（内存真源）——--json 握手输出用，不回读发现文件（双实例竞态）。 */
+    serverInfo,
     sessions,
     scheduler,
     shared: sharedRuntime,
     close: (cb) => {
       warmup?.cancel()
+      // 发现文件先清（pid 校验在 clearServerInfo 内）——优雅排空可能持续数秒，
+      // 期间新来的 attach 不该继续发现垂死实例。
+      clearServerInfo()
       // Legacy /prompt runs live on manager sessions too — abortAll covers both.
       sessions.abortAll()
       // Wave L: 与 TUI createShutdownHandler 对称——abort 中止 turn 后，对所有
@@ -1306,8 +1292,9 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
         // complete before the process exits, leaving orphaned subprocesses.
         sharedRuntime.mcpManager?.killChildrenSync()
         // Wave G: 释放 per-cwd 共享 Meridian/LSP 资源（module may still be loading).
-        if (serveAgentMod) {
-          serveAgentMod.disposeSharedCwdResources(sharedRuntime)
+        const agentMod = getLoadedServeAgentModule()
+        if (agentMod) {
+          agentMod.disposeSharedCwdResources(sharedRuntime)
         } else {
           sharedRuntime.meridianIndexers.clear()
           sharedRuntime.lspManagers.clear()
@@ -1334,73 +1321,6 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   }
 }
 
-export interface ParentWatchdogOptions {
-  /** Probe interval. Default 3000ms. */
-  intervalMs?: number
-  /** Consecutive failed probes required before onParentGone fires. Default 3. */
-  maxMisses?: number
-  /** Injectable liveness probe (tests). Returns true when the parent is alive. */
-  probe?: (ppid: number) => boolean
-}
-
-/** True when `ppid` still exists (signal-0 probe; EPERM = alive but not ours). */
-export function probeParentAlive(ppid: number): boolean {
-  try {
-    // signal 0 probes existence/permission without actually signalling.
-    process.kill(ppid, 0)
-    return true
-  } catch (err) {
-    // ESRCH = parent gone. EPERM = alive but not ours → still alive.
-    return (err as NodeJS.ErrnoException).code !== 'ESRCH'
-  }
-}
-
-/**
- * Parent-death watchdog. The desktop shell spawns the sidecar with
- * `RIVET_PARENT_PID` set to its own pid; we poll whether that process still
- * exists and self-terminate when it's gone. This is the cross-platform backstop
- * for the case the shell's `Child::kill()` can't cover — a crash, a SIGKILL, or
- * Windows "End task" — which would otherwise leave an orphaned `node.exe`
- * holding the port. No-op when the env var is absent (manual `rivet serve`).
- *
- * 宽限：单次探测失败可能是瞬时误报（父进程短暂无响应、电源状态切换等），
- * 立即自杀会造成「sidecar 半夜无故死亡」。改为连续 maxMisses 次（默认 3 次
- * ≈ 9s）失败才触发退出，期间任一次成功即清零；每次 miss 记日志留现场。
- */
-export function installParentWatchdog(
-  onParentGone: (info: { ppid: number; misses: number }) => void,
-  options: ParentWatchdogOptions = {},
-): void {
-  const raw = process.env.RIVET_PARENT_PID
-  const ppid = raw ? Number(raw) : NaN
-  if (!Number.isInteger(ppid) || ppid <= 0) return
-  const intervalMs = options.intervalMs ?? 3000
-  const maxMisses = options.maxMisses ?? 3
-  const probe = options.probe ?? probeParentAlive
-  let misses = 0
-  let fired = false
-  const timer = setInterval(() => {
-    if (fired) return
-    if (probe(ppid)) {
-      misses = 0
-      return
-    }
-    misses++
-    if (misses < maxMisses) {
-      console.error(`[serve] parent pid ${ppid} probe miss ${misses}/${maxMisses} — exiting after ${maxMisses} consecutive misses`)
-      return
-    }
-    // fired guard: shutdown (process.exit) may take a beat; the interval must
-    // not re-enter onParentGone in the meantime.
-    fired = true
-    clearInterval(timer)
-    onParentGone({ ppid, misses })
-  }, intervalMs)
-  // Don't let the watchdog itself keep the event loop alive — the HTTP server
-  // already does, and an unref'd timer won't block a clean exit.
-  timer.unref()
-}
-
 /**
  * Best-effort exit-reason breadcrumb. OOM / hard kills can't write anything, so
  * the PRESENCE of this file distinguishes a deliberate self-shutdown (watchdog,
@@ -1423,29 +1343,6 @@ function writeExitBreadcrumb(reason: string, extra: Record<string, unknown> = {}
   } catch {
     // best-effort — never block shutdown on breadcrumb IO
   }
-}
-
-/**
- * 解析 RIVET_SERVE_HOSTS_ALLOW：逗号分隔、去空、拒绝含 / 或 : 的形态（无端口/无路径）。
- * 全条目非法时返回 undefined 并 console.warn——保留「忽略」语义但不再静默：否则 LAN
- * bind + 全非法 allowlist 会无声退化为「任意 Host 放行」（P1 fail-open 缺陷修复）。
- */
-export function parseHostsAllow(raw: string | undefined): string[] | undefined {
-  if (!raw) return undefined
-  const out: string[] = []
-  for (const part of raw.split(',')) {
-    const h = part.trim().toLowerCase()
-    if (!h || h.includes('/') || h.includes(':')) continue
-    out.push(h)
-  }
-  if (out.length === 0) {
-    console.warn(
-      `[serve] RIVET_SERVE_HOSTS_ALLOW="${raw}" had no valid host entries ` +
-        '(each must be a bare hostname/IP without "/" or ":"); allowlist stays ' +
-        'unconfigured — on a LAN bind any Host passes (Bearer remains the only gate).',
-    )
-  }
-  return out.length > 0 ? out : undefined
 }
 
 /**
@@ -1482,11 +1379,16 @@ export async function serveCommand(args: string[]): Promise<void> {
   // --mobile-dir <path>：/mobile 静态挂载目录（P2）。缺失值报错同 --host。
   const mobileDirIdx = args.indexOf('--mobile-dir')
   const rawMobileDir = mobileDirIdx >= 0 ? args[mobileDirIdx + 1] : undefined
-  if (mobileDirIdx >= 0 && (rawMobileDir == null || rawMobileDir === '')) {
+  const mobileDir = rawMobileDir?.trim()
+  if (mobileDirIdx >= 0 && !mobileDir) {
     console.error('Missing value for --mobile-dir (e.g. --mobile-dir ./desktop/dist)')
     process.exit(1)
   }
-  const mobileDir = rawMobileDir?.trim()
+
+  // --attach/--json 的握手与 stdout 纯度在 server-info.ts（发现模块的 CLI 面）。
+  const jsonMode = args.includes('--json')
+  if (jsonMode) enableJsonModeStdoutPurity()
+  if (args.includes('--attach')) await attachOrExit(jsonMode)
 
   let server: RunningServer
   try {
@@ -1517,12 +1419,34 @@ export async function serveCommand(args: string[]): Promise<void> {
     }, 15_000).unref()
     server.close(() => process.exit(0))
   }
+  // 主动关停入口（2026-09-21）：把 shutdownServer 登记给路由层（POST /shutdown）。
+  // 桌面壳在杀 relay 前调它——那时 relay 还活着、REST 走 localhost 转发，是唯一
+  // 能在发行版被 WSL 回收（~17s）之前拿到完整清理链的窗口。breadcrumb 标
+  // shutdown-request 以区别于信号触发的退出（可归因性是 writeExitBreadcrumb 的
+  // 原始动机）。注意幂等：shutdownServer 二次进入 = exit(1) 强退，故路由层
+  // 「恰好一次」的契约（shutdown-route.test.ts）是有意义的约束。
+  setShutdownHandler(() => {
+    writeExitBreadcrumb('shutdown-request')
+    shutdownServer()
+  })
   process.on('SIGINT', () => {
     writeExitBreadcrumb('signal', { signal: 'SIGINT' })
     shutdownServer()
   })
   process.on('SIGTERM', () => {
     writeExitBreadcrumb('signal', { signal: 'SIGTERM' })
+    shutdownServer()
+  })
+  // SIGHUP 必须显式处理：WSL attach 形态下 serve 是 wsl.exe relay 在 Linux 侧的
+  // 同 session 子进程，桌面壳 disconnect 时 taskkill /T /F 杀掉 relay，内核给同
+  // session 前台进程组发 SIGHUP。Node 对 SIGHUP 默认 terminate——实测（2026-09-20
+  // 真机对照）连 process.on('exit') 都不触发，即 close 链一行不跑：发现文件残留
+  // （下次 attach 读到陈旧 pid）、无 breadcrumb（死亡不可归因，正是
+  // writeExitBreadcrumb 注释里那个"sidecar died overnight"的洞）、
+  // flushAllAsync 未执行（会话事件写链滞留行丢失）。映射到既有 shutdownServer
+  // 即复用整条优雅链；终端关闭、用户 kill session 同样受益。
+  process.on('SIGHUP', () => {
+    writeExitBreadcrumb('signal', { signal: 'SIGHUP' })
     shutdownServer()
   })
   installParentWatchdog(({ ppid, misses }) => {
@@ -1536,7 +1460,17 @@ export async function serveCommand(args: string[]): Promise<void> {
     try { server.shared.mcpManager?.killChildrenSync?.() } catch { /* best-effort */ }
   })
 
+  // 发现文件是对外的就绪信号，只能在上面的退出通路全部接好之后发布：否则发布后、
+  // 处理器注册前的空档里收到 SIGHUP/SIGTERM，Node 默认直接终止进程，文件残留。
+  writeServerInfo(server.serverInfo)
   const displayHost = host === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : (host ?? '127.0.0.1')
-  console.log(`Rivet Runtime API listening on http://${displayHost}:${port}`)
-  console.log('Endpoints: GET /status, POST /abort, POST /prompt, /sessions/*')
+  if (jsonMode) {
+    // 握手模式：banner 走 stderr；坐标来自 RunningServer.serverInfo（内存真源，
+    // 不回读磁盘——双实例竞态下回读会输出成别人的坐标）。
+    console.error(`Rivet Runtime API listening on http://${displayHost}:${port}`)
+    printSpawnedHandshake(server.serverInfo, (l) => console.log(l))
+  } else {
+    console.log(`Rivet Runtime API listening on http://${displayHost}:${port}`)
+    console.log('Endpoints: GET /status, POST /abort, POST /prompt, /sessions/*')
+  }
 }

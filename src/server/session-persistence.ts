@@ -28,12 +28,15 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { open, readFile } from 'node:fs/promises'
+import { open, readFile, stat } from 'node:fs/promises'
 import { appendFile, mkdir, writeFile, rename } from 'node:fs/promises'
 import { setImmediate as yieldToLoop } from 'node:timers/promises'
 import { extname, join } from 'node:path'
+import { contextFileKind, CONTEXT_DOCUMENT_MIME } from './file-context-policy.js'
 import { cpuPool } from '../workers/cpu-pool.js'
-import { parseEventsJsonlRaw, parseEventsTailRaw } from '../workers/cpu-tasks.js'
+import { parseEventsJsonlRaw } from '../workers/cpu-tasks.js'
+import { readEventsTailRaw } from '../workers/events-tail.js'
+import { readEventsTailIndexed, type IndexedEventsTail } from '../workers/events-summary.js'
 import type {
   EventsTail,
   PersistedSession,
@@ -693,7 +696,8 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     const d = join(this.ensureDir(sessionId), 'documents')
     if (!existsSync(d)) mkdirSync(d, { recursive: true })
     const ext = extname(fileName).toLowerCase().replace(/^\./, '')
-    const safeExt = DOC_EXT_MIME.has(ext) ? ext : 'bin'
+    const kind = contextFileKind(fileName)
+    const safeExt = kind === 'text' || kind === 'candidate' ? 'txt' : DOC_EXT_MIME.has(ext) ? ext : 'bin'
     writeFileSync(join(d, `${sanitize(docId)}.${safeExt}`), Buffer.from(base64, 'base64'))
   }
 
@@ -901,47 +905,36 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   }
 
   /**
-   * 首开会话的尾部读——只把内存环留得下的部分搬过线程边界。
-   *
-   * loadEventsAsync 会把整本日志的解析结果回传，调用方随即按 maxEvents 截尾丢掉
-   * 其余。parse 在 worker 里不占主线程，但 structured clone 的成本与条数成正比
-   * （实测 3.56 MB / 43,717 条：全量回传 139ms，尾部 5,000 条 14ms），那份搬运
-   * 是纯浪费。截断挪进 worker 后，代价与日志长度解耦、只与环容量相关。
-   *
-   * 被截掉的头部仍有两样东西要带出来：磁盘最早 seq（前端据此判断还有没有更早的
-   * 历史）和全量 artifact id（去重集不完整会让旧 artifact 重放时被重新公告）。
+   * 首开会话使用可校验分块摘要；缺失/失效时流式重建，不信任缓存的字节位置。
+   * worker 自行分块读文件，主线程只传路径，不克隆整本日志；不可用时
+   * 复用同一流式扫描器（每块让出事件循环），避免兜底重新放大全量内存。
    */
   async loadEventsTailAsync(id: string, maxEvents: number): Promise<EventsTail> {
-    const empty: EventsTail = { events: [], diskFirstSeq: 0, lastSeq: 0, artifactIds: [], total: 0 }
-    this.flushSession(id)
+    await this.flushSessionAsync(id)
     const file = join(this.dir(id), 'events.jsonl')
-    // RIVET_DEBUG_RENDER=1：拆出 read / parse 两段耗时（冷开会话首屏归因，
-    // 见 docs/dev/render-debug-playbook.md）。
-    const __dbg = process.env.RIVET_DEBUG_RENDER === '1'
-    const __t0 = __dbg ? performance.now() : 0
-    let text: string
-    try {
-      text = await readFile(file, 'utf8')
-    } catch {
-      return empty
-    }
-    if (!text) return empty
-    const __tRead = __dbg ? performance.now() : 0
-    const __log = (mode: string, tail: EventsTail) => {
-      if (__dbg) {
-        console.error(`[stream] loadEventsTail id=${id} bytes=${text.length} read=${Math.round(__tRead - __t0)}ms parse(${mode})=${Math.round(performance.now() - __tRead)}ms total=${tail.total} kept=${tail.events.length}`)
+    const debug = process.env.RIVET_DEBUG_RENDER === '1'
+    const start = debug ? performance.now() : 0
+    let mode = 'inline'
+    let tail: EventsTail
+    let indexed: IndexedEventsTail | undefined
+    let bytes = 0
+    try { bytes = (await stat(file)).size } catch { /* scanner handles missing files */ }
+    if (bytes < FileSessionPersistence.INLINE_PARSE_MAX_BYTES || !cpuPool.available) {
+      try { indexed = await readEventsTailIndexed(file, maxEvents) }
+      catch { tail = await readEventsTailRaw(file, maxEvents) as EventsTail }
+    } else {
+      try {
+        indexed = await cpuPool.run('readEventsTailIndexed', [file, maxEvents]) as IndexedEventsTail
+        mode = 'worker'
+      } catch {
+        tail = await readEventsTailRaw(file, maxEvents) as EventsTail
       }
-      return tail
     }
-    // RawSessionEvent.type 是宽 string（worker 侧不依赖事件类型联合），在此收窄，
-    // 与 loadEventsAsync 的边界处理一致。
-    if (text.length < 256 * 1024) return __log('inline', parseEventsTailRaw(text, maxEvents) as EventsTail)
-    try {
-      return __log('worker', (await cpuPool.run('parseEventsTailRaw', [text, maxEvents])) as EventsTail)
-    } catch {
-      // pool 不可用：分批 parse（批间让出事件循环），再在主线程截尾。
-      return __log('chunked', tailOf(await chunkedParseEvents(text), maxEvents))
+    if (indexed) tail = indexed.tail as EventsTail
+    if (debug) {
+      console.error(`[stream] loadEventsTail id=${id} bytes=${bytes} parse(${mode})=${Math.round(performance.now() - start)}ms total=${tail!.total} kept=${tail!.events.length} summary=${JSON.stringify(indexed?.metrics ?? { mode: 'fallback' })}`)
     }
+    return tail!
   }
 
   /**
@@ -1412,41 +1405,6 @@ async function chunkedParseEvents(text: string): Promise<SessionEvent[]> {
   return events
 }
 
-/** 把一份全量解析结果收成尾部形状——pool 不可用时的兜底路径复用，
- *  保持与 worker 侧 parseEventsTailRaw 完全一致的语义。 */
-function tailOf(all: SessionEvent[], maxEvents: number): EventsTail {
-  if (all.length === 0) {
-    return { events: [], diskFirstSeq: 0, lastSeq: 0, artifactIds: [], total: 0 }
-  }
-  const artifactIds: string[] = []
-  for (const e of all) {
-    if (e.type === 'artifact') artifactIds.push(String(e.data.id))
-  }
-  return {
-    // delegation 豁免截尾（M1，与 worker 侧 tailExemptDelegation 同语义）：
-    // 保留尾部 maxEvents 条 + 全部 delegation，stale 对账与回放依赖它们完整。
-    events: all.length > maxEvents
-      ? (() => {
-          const overflow = all.length - maxEvents
-          const kept: SessionEvent[] = []
-          let dropped = 0
-          for (const e of all) {
-            if (dropped < overflow && e.type !== 'delegation') {
-              dropped++
-              continue
-            }
-            kept.push(e)
-          }
-          return kept
-        })()
-      : all,
-    diskFirstSeq: all[0]!.seq,
-    lastSeq: all[all.length - 1]!.seq,
-    artifactIds,
-    total: all.length,
-  }
-}
-
 /** Provider-safe image MIMEs ↔ file extensions (single source of truth). */
 const EXT_MIME: ReadonlyArray<readonly [string, string]> = [
   ['png', 'image/png'],
@@ -1461,16 +1419,6 @@ function extForMime(mime: string): string {
 }
 
 /** 可抽取文档的扩展名 ↔ MIME（与 doc-extract 的 EXTRACTABLE 对齐 + bin 兜底）。 */
-const DOC_EXT_MIME: ReadonlyMap<string, string> = new Map([
-  ['pdf', 'application/pdf'],
-  ['docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-  ['doc', 'application/msword'],
-  ['rtf', 'application/rtf'],
-  ['odt', 'application/vnd.oasis.opendocument.text'],
-  ['pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
-  ['odp', 'application/vnd.oasis.opendocument.presentation'],
-  ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
-  ['xls', 'application/vnd.ms-excel'],
-  ['ods', 'application/vnd.oasis.opendocument.spreadsheet'],
-  ['bin', 'application/octet-stream'],
-])
+const DOC_EXT_MIME: ReadonlyMap<string, string> = new Map(Object.entries({
+  ...CONTEXT_DOCUMENT_MIME, txt: 'text/plain; charset=utf-8', bin: 'application/octet-stream',
+}))
