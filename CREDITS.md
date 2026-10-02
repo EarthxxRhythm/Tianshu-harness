@@ -337,3 +337,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #305 fix(tui): 终端文本契约补裸 CR 与 C1 剥除——再入丢行/行缓冲上界/writeBatch 旁路一并收口（CLOSED）
 - #304 fix(cli+auth): 二次 Ctrl+C 强退保险丝 / OAuth 拒存 undefined 凭据 / 过期刷新并发去重（CLOSED）
 - #320 fix(tools): 浏览器就绪探测与启动回退系统 Chromium (#302)（CLOSED）
+
+## @Eternal-dream-MAX
+
+署名：Eternal-dream-MAX <130294909+Eternal-dream-MAX@users.noreply.github.com>
+
+- #333 完善 CLI 前端三平台兼容，汇总完整升级与回归（MERGED）
