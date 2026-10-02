@@ -364,3 +364,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #312 feat(goal): 上下文接力——goal 模式到达阈值自动交接、开新会话继续（可选，默认关闭）（CLOSED）
 - #311 fix(security): 危险命令审批绕过——`git push -f` / `+refspec`、`git clean -fd(x)`、PowerShell `iwr | iex` 免审（CLOSED）
 - #310 fix(security): 敏感文件门绕过——`.env.*.local` 叠加后缀漏判、`git add` 引号/全局选项/通配形态漏检（CLOSED）
+- #309 fix(agent): import-graph 漏边——父级 `../` 分支正则误写、ESM `.js`→`.ts` 未映射、多行 import / export-from 不识别（CLOSED）
